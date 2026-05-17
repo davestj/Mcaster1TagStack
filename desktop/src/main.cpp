@@ -1,19 +1,20 @@
-// main.cpp — Mcaster1TagStack desktop entry point (Phase 1 stub).
-// Phase 3 will replace this with the real Library + ICY 2.2 windows.
+// main.cpp — Mcaster1 TagStack desktop entry point.
+//
+// Uses Qt's default native style (no QStyle override, no QPalette tweaks,
+// no stylesheet). On macOS that's the native Cocoa look, on Linux Fusion,
+// on Windows native. Theme work is out of scope for this phase.
+
+#include "MainWindow.h"
 
 #include <QApplication>
-#include <QLabel>
-#include <QMainWindow>
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
-    QMainWindow w;
-    w.setWindowTitle("Mcaster1 TagStack");
-    auto* label = new QLabel("TagStack v2 — Phase 1 skeleton.\n"
-                             "Phase 3 will replace this with the real UI.", &w);
-    label->setAlignment(Qt::AlignCenter);
-    w.setCentralWidget(label);
-    w.resize(720, 420);
+    QApplication::setApplicationName("Mcaster1 TagStack");
+    QApplication::setOrganizationName("Mcaster1");
+    QApplication::setOrganizationDomain("mcaster1.com");
+
+    MainWindow w;
     w.show();
     return app.exec();
 }

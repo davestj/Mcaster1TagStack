@@ -70,3 +70,22 @@ __REFERENCE_ONLY__.md
 # ── Ruby / Bundler — Capistrano deploy tooling ─────────────────────────────
 vendor/bundle/
 .bundle/
+
+# ── Autotools generated (desktop/) — keep configure.ac + Makefile.am only ──
+# Anything autoreconf, configure, or make produces is regenerable.
+desktop/autom4te.cache/
+desktop/aclocal.m4
+desktop/configure
+desktop/configure~
+desktop/build-aux/
+desktop/Makefile
+desktop/Makefile.in
+desktop/config.status
+desktop/config.log
+desktop/src/Makefile
+desktop/src/Makefile.in
+desktop/src/.deps/
+desktop/src/moc_*.cpp
+desktop/src/tagstack-desktop
+desktop/m4/*.m4
+!desktop/m4/.gitkeep
