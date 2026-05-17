@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=www-data
 Group=www-data
+SupplementaryGroups=ssl-cert
 WorkingDirectory=/var/www/tagstack.mcaster1.com/current
 ExecStart=/var/www/tagstack.mcaster1.com/current/daemon/build/tagstackd --config /var/www/tagstack.mcaster1.com/current/daemon/etc/tagstackd.yaml
 ExecReload=/bin/kill -HUP $MAINPID
