@@ -520,6 +520,10 @@ int main(int argc, char** argv) {
             return;
         }
         std::string url = cfg.ollama.endpoint + "/api/generate";
+        // Materialize the request body — curl reads CURLOPT_POSTFIELDS lazily
+        // during curl_easy_perform, so the buffer must outlive the call. A
+        // temporary from oreq.str() would dangle here.
+        std::string oreq_body = oreq.str();
         std::string resp_body;
         long http_status = 0;
         auto t0 = std::chrono::steady_clock::now();
@@ -527,7 +531,8 @@ int main(int argc, char** argv) {
         hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, oreq.str().c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(oreq_body.size()));
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, oreq_body.c_str());
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_to_string);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp_body);
@@ -599,12 +604,25 @@ int main(int argc, char** argv) {
         res.set_content(envelope(d.str()), "application/json; charset=utf-8");
     });
 
-    // ── 404 ──
+    // ── Error fallback ──
+    // cpp-httplib invokes this on any res.status >= 400. We only want to
+    // synthesize a body when no handler already provided one (the genuine
+    // "no route" case). Otherwise the handler's own envelope is preserved.
     svr.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
+        if (!res.body.empty()) { return; }
+        const char* code = (res.status == 404) ? "NOT_FOUND"
+                         : (res.status == 405) ? "METHOD_NOT_ALLOWED"
+                         : (res.status == 400) ? "BAD_REQUEST"
+                         : "ERROR";
+        const char* msg  = (res.status == 404) ? "no route matches"
+                         : (res.status == 405) ? "method not allowed"
+                         : (res.status == 400) ? "bad request"
+                         : "request failed";
         std::ostringstream meta_extra;
         meta_extra << ",\"path\":\"" << req.path << "\""
-                   << ",\"method\":\"" << req.method << "\"";
-        res.set_content(envelope_error("NOT_FOUND", "no route matches", meta_extra.str()),
+                   << ",\"method\":\"" << req.method << "\""
+                   << ",\"status\":" << res.status;
+        res.set_content(envelope_error(code, msg, meta_extra.str()),
                         "application/json; charset=utf-8");
     });
 
