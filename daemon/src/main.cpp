@@ -9,6 +9,8 @@
 #include "httplib.h"
 #include "db.hpp"
 
+#include <curl/curl.h>
+
 #include <yaml-cpp/yaml.h>
 
 #include <atomic>
@@ -48,6 +50,11 @@ std::string iso8601_now() {
     return buf;
 }
 
+struct OllamaConfig {
+    std::string endpoint = "http://127.0.0.1:11434";
+    int         timeout_seconds = 120;
+};
+
 struct DaemonConfig {
     std::string bind_addr = "0.0.0.0";
     int         port      = 9890;
@@ -56,7 +63,15 @@ struct DaemonConfig {
     std::string hostname  = "tagstack.mcaster1.com";
     std::string log_level = "info";
     mcaster1::tagstack::db::Config db;
+    OllamaConfig ollama;
 };
+
+// libcurl write callback — appends to a std::string passed in userdata.
+size_t curl_write_to_string(void* ptr, size_t size, size_t nmemb, void* userdata) {
+    auto* s = static_cast<std::string*>(userdata);
+    s->append(static_cast<char*>(ptr), size * nmemb);
+    return size * nmemb;
+}
 
 DaemonConfig load_config(const std::string& path) {
     DaemonConfig c;
@@ -78,6 +93,10 @@ DaemonConfig load_config(const std::string& path) {
             if (d["name"]) c.db.name = d["name"].as<std::string>();
             if (d["user"]) c.db.user = d["user"].as<std::string>();
             if (d["pass"]) c.db.pass = d["pass"].as<std::string>();
+        }
+        if (auto o = y["ollama"]) {
+            if (o["endpoint"])        c.ollama.endpoint        = o["endpoint"].as<std::string>();
+            if (o["timeout_seconds"]) c.ollama.timeout_seconds = o["timeout_seconds"].as<int>();
         }
     } catch (const std::exception& e) {
         std::cerr << "[tagstackd] config load failed: " << e.what() << "\n";
@@ -429,6 +448,131 @@ int main(int argc, char** argv) {
         }
     });
 
+    // ── POST /api/v1/ai/persona/{persona} ──
+    // Proxies a generation request to local Ollama and returns the response
+    // wrapped in the standard envelope. Body: { "prompt": "..." } and optional
+    // "model" override. By default the model used is whatever Ollama has
+    // configured for that persona.
+    svr.Post(R"(/api/v1/ai/persona/([A-Za-z0-9_.-]+))",
+             [&cfg](const httplib::Request& req, httplib::Response& res) {
+        std::string persona = req.matches[1];
+        const std::string& body = req.body;
+
+        // Parse prompt + optional model from the request body
+        auto extract = [&](const std::string& key) -> std::string {
+            std::string needle = "\"" + key + "\"";
+            auto p = body.find(needle);
+            if (p == std::string::npos) return "";
+            p = body.find(':', p);
+            if (p == std::string::npos) return "";
+            p = body.find('"', p);
+            if (p == std::string::npos) return "";
+            ++p;
+            std::string out;
+            while (p < body.size() && body[p] != '"') {
+                if (body[p] == '\\' && p + 1 < body.size()) {
+                    char n = body[p+1];
+                    if      (n == '"')  out += '"';
+                    else if (n == '\\') out += '\\';
+                    else if (n == 'n')  out += '\n';
+                    else if (n == 't')  out += '\t';
+                    else                out += n;
+                    p += 2;
+                } else {
+                    out += body[p++];
+                }
+            }
+            return out;
+        };
+        std::string prompt = extract("prompt");
+        std::string model  = extract("model");
+
+        if (prompt.empty()) {
+            res.status = 400;
+            res.set_content(envelope_error("VALIDATION", "missing 'prompt' field"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+
+        // Build the Ollama request body: { "model": persona, "prompt": ..., "stream": false }
+        std::string used_model = model.empty() ? persona : model;
+        std::ostringstream oreq;
+        oreq << "{\"model\":\"" << json_escape(used_model) << "\""
+             << ",\"prompt\":\"" << json_escape(prompt) << "\""
+             << ",\"stream\":false}";
+
+        // POST to /api/generate
+        CURL* curl = curl_easy_init();
+        if (!curl) {
+            res.status = 500;
+            res.set_content(envelope_error("INTERNAL", "curl_easy_init failed"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+        std::string url = cfg.ollama.endpoint + "/api/generate";
+        std::string resp_body;
+        long http_status = 0;
+        auto t0 = std::chrono::steady_clock::now();
+        struct curl_slist* hdrs = nullptr;
+        hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, oreq.str().c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_to_string);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp_body);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(cfg.ollama.timeout_seconds));
+        CURLcode rc = curl_easy_perform(curl);
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+        curl_slist_free_all(hdrs);
+        curl_easy_cleanup(curl);
+        auto t1 = std::chrono::steady_clock::now();
+        long latency_ms = static_cast<long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+
+        if (rc != CURLE_OK || http_status >= 400) {
+            res.status = 502;
+            std::string err = "ollama upstream error: ";
+            err += (rc != CURLE_OK ? curl_easy_strerror(rc)
+                                   : ("http_" + std::to_string(http_status)));
+            res.set_content(envelope_error("UPSTREAM", err),
+                            "application/json; charset=utf-8");
+            return;
+        }
+
+        // Extract the "response" field from Ollama's reply (it's a JSON object).
+        auto find_field = [](const std::string& blob, const std::string& key) -> std::string {
+            std::string needle = "\"" + key + "\"";
+            auto p = blob.find(needle);
+            if (p == std::string::npos) return "";
+            p = blob.find(':', p);
+            if (p == std::string::npos) return "";
+            p = blob.find('"', p);
+            if (p == std::string::npos) return "";
+            ++p;
+            std::string out;
+            while (p < blob.size() && blob[p] != '"') {
+                if (blob[p] == '\\' && p + 1 < blob.size()) {
+                    out += blob[p];
+                    out += blob[p+1];
+                    p += 2;
+                } else {
+                    out += blob[p++];
+                }
+            }
+            return out;
+        };
+        std::string text = find_field(resp_body, "response");
+
+        std::ostringstream d;
+        d << "{\"persona\":\"" << json_escape(persona) << "\""
+          << ",\"model\":\""   << json_escape(used_model) << "\""
+          << ",\"latency_ms\":" << latency_ms
+          << ",\"text\":\""    << text << "\""
+          << "}";
+        res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+    });
+
     // ── / (landing) ──
     svr.Get("/", [&cfg](const httplib::Request&, httplib::Response& res) {
         std::ostringstream d;
@@ -439,7 +583,8 @@ int main(int argc, char** argv) {
           << "\"/api/v1/health\","
           << "\"/api/v1/version\","
           << "\"/api/v1/stations\","
-          << "\"/api/v1/now-playing/{station}\""
+          << "\"/api/v1/now-playing/{station}\","
+          << "\"/api/v1/ai/persona/{persona}\""
           << "]}";
         res.set_content(envelope(d.str()), "application/json; charset=utf-8");
     });
