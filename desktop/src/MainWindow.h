@@ -30,6 +30,9 @@ class QListWidget;
 class QStackedWidget;
 class QLabel;
 class QPushButton;
+class QMediaPlayer;
+class QAudioOutput;
+class QSlider;
 
 class ApiClient;
 class DirectoryPage;
@@ -56,10 +59,19 @@ public:
     // session to populate their pickers.
     void setActiveSession(const QString& serverLabel, const QString& mount);
 
+public slots:
+    // Wired to DirectoryPage::stationActivated. Loads the URL into the player
+    // but doesn't start playback automatically — the user hits Play.
+    void loadStream(const QString& name, const QString& listenUrl);
+
 private slots:
     void onNavChanged(int row);
     void onLogoutClicked();
     void onMeReceived(const QJsonObject& user);
+    void onPlayClicked();
+    void onStopClicked();
+    void onPlayerErrorOccurred(int error, const QString& errorString);
+    void onPlayerStateChanged(int state);
 
 private:
     void buildNavPanel();
@@ -72,8 +84,14 @@ private:
     QLabel*         m_playerInfo  = nullptr;
     QPushButton*    m_playerPlay  = nullptr;
     QPushButton*    m_playerStop  = nullptr;
+    QSlider*        m_volumeSlider= nullptr;
     QPushButton*    m_logoutBtn   = nullptr;
     QLabel*         m_statusLabel = nullptr;
+
+    QMediaPlayer*   m_player      = nullptr;
+    QAudioOutput*   m_audioOut    = nullptr;
+    QString         m_currentStreamName;
+    QString         m_currentStreamUrl;
 
     // Pages owned by m_stack — order must match nav row order.
     DirectoryPage*     m_pageDirectory     = nullptr;

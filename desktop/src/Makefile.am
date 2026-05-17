@@ -67,6 +67,7 @@ AM_CXXFLAGS = \
     $(QT6CORE_CFLAGS) \
     $(QT6WIDGETS_CFLAGS) \
     $(QT6NETWORK_CFLAGS) \
+    $(QT6MULTIMEDIA_CFLAGS) \
     $(CURL_CFLAGS) \
     $(OPENSSL_CFLAGS) \
     $(YAMLCPP_CFLAGS) \
@@ -77,6 +78,7 @@ tagstack_desktop_LDADD = \
     $(QT6CORE_LIBS) \
     $(QT6WIDGETS_LIBS) \
     $(QT6NETWORK_LIBS) \
+    $(QT6MULTIMEDIA_LIBS) \
     $(CURL_LIBS) \
     $(OPENSSL_LIBS) \
     $(YAMLCPP_LIBS) \

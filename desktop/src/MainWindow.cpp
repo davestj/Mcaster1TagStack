@@ -15,13 +15,17 @@
 #include "DataQueuePage.h"
 #include "EventsPage.h"
 
+#include <QAudioOutput>
 #include <QHBoxLayout>
 #include <QJsonObject>
 #include <QLabel>
 #include <QListWidget>
+#include <QMediaPlayer>
 #include <QPushButton>
+#include <QSlider>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -56,6 +60,20 @@ MainWindow::MainWindow(ApiClient* api, QWidget* parent)
     connect(m_api, &ApiClient::meReceived, this, &MainWindow::onMeReceived);
     m_api->me();
 
+    // Audio player. QAudioOutput owns the volume; QMediaPlayer owns playback.
+    m_audioOut = new QAudioOutput(this);
+    m_audioOut->setVolume(0.85);
+    m_player = new QMediaPlayer(this);
+    m_player->setAudioOutput(m_audioOut);
+    connect(m_player, &QMediaPlayer::errorOccurred,
+            this, [this](QMediaPlayer::Error e, const QString& s) {
+        onPlayerErrorOccurred(static_cast<int>(e), s);
+    });
+    connect(m_player, &QMediaPlayer::playbackStateChanged,
+            this, [this](QMediaPlayer::PlaybackState st) {
+        onPlayerStateChanged(static_cast<int>(st));
+    });
+
     auto* central = new QWidget(this);
     auto* outer   = new QVBoxLayout(central);
     outer->setContentsMargins(0, 0, 0, 0);
@@ -86,6 +104,8 @@ MainWindow::MainWindow(ApiClient* api, QWidget* parent)
     stripRow->addWidget(m_playerPlay, 0);
     stripRow->addWidget(m_playerStop, 0);
     stripRow->addWidget(m_playerInfo, 1);
+    stripRow->addWidget(new QLabel("Vol"));
+    stripRow->addWidget(m_volumeSlider, 0);
     outer->addWidget(strip, 0);
 
     setCentralWidget(central);
@@ -117,6 +137,8 @@ void MainWindow::buildNavPanel() {
 void MainWindow::buildContentStack() {
     m_stack = new QStackedWidget();
     m_pageDirectory     = new DirectoryPage(m_api);
+    connect(m_pageDirectory, &DirectoryPage::stationActivated,
+            this, &MainWindow::loadStream);
     m_pageServers       = new ServersPage(m_api);
     m_pageMedia         = new MediaLibraryPage();
     m_pageIcy22         = new Icy22Page(m_api);
@@ -144,8 +166,18 @@ void MainWindow::buildContentStack() {
 void MainWindow::buildPlayerStrip() {
     m_playerPlay = new QPushButton("Play");
     m_playerStop = new QPushButton("Stop");
-    m_playerInfo = new QLabel("No track loaded");
+    m_playerStop->setEnabled(false);
+    m_playerInfo = new QLabel("Select a station in the Directory");
     m_playerInfo->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_volumeSlider = new QSlider(Qt::Horizontal);
+    m_volumeSlider->setRange(0, 100);
+    m_volumeSlider->setValue(85);
+    m_volumeSlider->setFixedWidth(120);
+    connect(m_playerPlay,   &QPushButton::clicked, this, &MainWindow::onPlayClicked);
+    connect(m_playerStop,   &QPushButton::clicked, this, &MainWindow::onStopClicked);
+    connect(m_volumeSlider, &QSlider::valueChanged, this, [this](int v) {
+        if (m_audioOut) m_audioOut->setVolume(v / 100.0);
+    });
 }
 
 void MainWindow::onNavChanged(int row) {
@@ -171,4 +203,49 @@ void MainWindow::onMeReceived(const QJsonObject& user) {
     auto name = user.value("display_name").toString();
     if (name.isEmpty()) name = user.value("username").toString();
     m_statusLabel->setText("Signed in as: " + name);
+}
+
+void MainWindow::loadStream(const QString& name, const QString& listenUrl) {
+    if (listenUrl.isEmpty()) {
+        m_playerInfo->setText("(no listen URL)");
+        return;
+    }
+    m_currentStreamName = name;
+    m_currentStreamUrl  = listenUrl;
+    m_player->stop();
+    m_player->setSource(QUrl(listenUrl));
+    m_playerInfo->setText(name + "  ·  " + listenUrl);
+}
+
+void MainWindow::onPlayClicked() {
+    if (m_currentStreamUrl.isEmpty()) {
+        m_playerInfo->setText("Select a station in the Directory first.");
+        return;
+    }
+    // If the player is in a stopped/end state, reseat the source — some
+    // backends discard the URL on stop().
+    if (m_player->source().isEmpty()) {
+        m_player->setSource(QUrl(m_currentStreamUrl));
+    }
+    m_player->play();
+}
+
+void MainWindow::onStopClicked() {
+    m_player->stop();
+}
+
+void MainWindow::onPlayerErrorOccurred(int /*error*/, const QString& errorString) {
+    m_playerInfo->setText("Player error: " + errorString);
+}
+
+void MainWindow::onPlayerStateChanged(int state) {
+    // QMediaPlayer::PlaybackState: 0=Stopped, 1=Playing, 2=Paused
+    bool playing = (state == 1);
+    m_playerPlay->setEnabled(!playing);
+    m_playerStop->setEnabled(playing || state == 2);
+    if (playing && !m_currentStreamName.isEmpty()) {
+        m_playerInfo->setText("Playing: " + m_currentStreamName);
+    } else if (state == 0 && !m_currentStreamName.isEmpty()) {
+        m_playerInfo->setText("Stopped: " + m_currentStreamName);
+    }
 }

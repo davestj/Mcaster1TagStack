@@ -32,9 +32,11 @@ AX_CXX_COMPILE_STDCXX([17], [noext], [mandatory])
 PKG_PROG_PKG_CONFIG([0.29])
 
 # Qt6 — Core / Widgets / Network are the minimum for the v1 layout port.
-PKG_CHECK_MODULES([QT6CORE],    [Qt6Core    >= 6.5])
-PKG_CHECK_MODULES([QT6WIDGETS], [Qt6Widgets >= 6.5])
-PKG_CHECK_MODULES([QT6NETWORK], [Qt6Network >= 6.5])
+# Multimedia is required for the player strip (QMediaPlayer + QAudioOutput).
+PKG_CHECK_MODULES([QT6CORE],       [Qt6Core       >= 6.5])
+PKG_CHECK_MODULES([QT6WIDGETS],    [Qt6Widgets    >= 6.5])
+PKG_CHECK_MODULES([QT6NETWORK],    [Qt6Network    >= 6.5])
+PKG_CHECK_MODULES([QT6MULTIMEDIA], [Qt6Multimedia >= 6.5])
 
 # moc / rcc — find the binaries. Qt6 hides them in libexecdir; pkg-config
 # exposes that. We also try the conventional names in PATH for Linux distros

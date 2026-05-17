@@ -137,9 +137,9 @@ void DirectoryPage::onStationSelected() {
     auto rows = m_stationTable->selectionModel()->selectedRows();
     if (rows.isEmpty()) return;
     int r = rows.first().row();
-    auto* item = m_stationTable->item(r, 0);
-    if (!item) return;
-    QString id = item->data(Qt::UserRole).toString();
+    auto* nameItem = m_stationTable->item(r, 0);
+    if (!nameItem) return;
+    QString id = nameItem->data(Qt::UserRole).toString();
     if (id.isEmpty()) return;
     loadStation(id);
 }
@@ -226,6 +226,9 @@ void DirectoryPage::onDirectoryListReceived(const QJsonArray& stations) {
 
 void DirectoryPage::onStationReceived(const QJsonObject& station) {
     m_stationName->setText("<b>" + station.value("server_name").toString() + "</b>");
+    // Hand the listen URL to MainWindow's player strip.
+    emit stationActivated(station.value("server_name").toString(),
+                          station.value("listen_url").toString());
     QString meta;
     meta += "<table style='font-size: small'>";
     auto row = [&](const QString& k, const QString& v) {
