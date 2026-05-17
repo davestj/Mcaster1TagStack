@@ -32,8 +32,8 @@ namespace {
 // "1-based" thing and let QListWidget rows be 0-based.
 struct NavItem { const char* label; };
 constexpr NavItem kNavItems[] = {
-    {"Directory"},      // new: YP station directory + tagging
-    {"Servers"},
+    {"Directory"},      // YP station directory + tagging
+    {"My Stations"},    // broadcast stations I own (CRUD)
     {"Media"},
     {"ICY 2.2"},
     {"Live Stream"},
@@ -117,7 +117,7 @@ void MainWindow::buildNavPanel() {
 void MainWindow::buildContentStack() {
     m_stack = new QStackedWidget();
     m_pageDirectory     = new DirectoryPage(m_api);
-    m_pageServers       = new ServersPage();
+    m_pageServers       = new ServersPage(m_api);
     m_pageMedia         = new MediaLibraryPage();
     m_pageIcy22         = new Icy22Page(m_api);
     m_pageLive          = new LiveStreamPage();

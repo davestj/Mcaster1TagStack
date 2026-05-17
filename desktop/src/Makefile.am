@@ -24,7 +24,8 @@ tagstack_desktop_SOURCES = \
     ScanProgressDlg.cpp \
     MetadataEditorDlg.cpp \
     DbBackupDlg.cpp \
-    DbMigrationWizardDlg.cpp
+    DbMigrationWizardDlg.cpp \
+    StationEditDlg.cpp
 
 # Generated MOC sources — one per header that declares Q_OBJECT. These must
 # be built before the .cpp files compile because the .cpp files include them
@@ -49,7 +50,8 @@ nodist_tagstack_desktop_SOURCES = \
     moc_ScanProgressDlg.cpp \
     moc_MetadataEditorDlg.cpp \
     moc_DbBackupDlg.cpp \
-    moc_DbMigrationWizardDlg.cpp
+    moc_DbMigrationWizardDlg.cpp \
+    moc_StationEditDlg.cpp
 
 BUILT_SOURCES = $(nodist_tagstack_desktop_SOURCES)
 CLEANFILES    = $(nodist_tagstack_desktop_SOURCES)
