@@ -6,7 +6,7 @@ set -euo pipefail
 
 STAGE="${1:-production}"
 RELEASE_DIR="${PWD}"
-SHARED_ETC="/var/www/tagstack.mcaster1.com/shared/etc"
+SHARED_ETC="/var/www/tagstack.mcaster1.com/shared/daemon/etc"
 CONFIG="${SHARED_ETC}/tagstackd.yaml"
 
 if [[ ! -f "$CONFIG" ]]; then

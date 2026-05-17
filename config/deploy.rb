@@ -59,14 +59,16 @@ namespace :db do
   end
 end
 
-# Run Ollama persona Modelfile installs if present
+# Run Ollama persona Modelfile installs if present.
+# Ships a discrete shell script in scripts/ instead of inlining shell
+# logic here — Capistrano's execute(:bash, "-c", ...) word-splits awkwardly.
 namespace :ollama do
   desc "Install/update personas from daemon/personas/"
   task :build_personas do
     on roles(:app) do
-      execute :bash, "-c",
-        "for d in #{release_path}/daemon/personas/*/; do " \
-        "[ -f \"$d/Modelfile\" ] && ollama create $(basename $d) -f $d/Modelfile; done"
+      within release_path do
+        execute :bash, "scripts/build-personas.sh"
+      end
     end
   end
 end
