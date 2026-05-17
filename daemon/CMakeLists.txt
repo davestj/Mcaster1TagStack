@@ -47,6 +47,7 @@ target_link_libraries(tagstackd PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
     ${MARIADB_LIBRARIES}
+    crypt
 )
 
 target_link_directories(tagstackd PRIVATE ${MARIADB_LIBRARY_DIRS})

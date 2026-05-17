@@ -21,6 +21,11 @@ struct Config {
     std::string name;
     std::string user;
     std::string pass;
+    // SSL: when true, the connection is encrypted. When verify_cert=false the
+    // server cert is not validated against a CA — acceptable for cross-server
+    // links pinned by source IP allowlists but never for trust boundaries.
+    bool        ssl              = false;
+    bool        ssl_verify_cert  = true;
 };
 
 class ConnectionError : public std::runtime_error {
@@ -102,6 +107,14 @@ public:
         unsigned int timeout = 5;
         mysql_options(mysql_, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
         mysql_options(mysql_, MYSQL_SET_CHARSET_NAME, "utf8mb4");
+        if (c.ssl) {
+            // MariaDB connector: setting MYSQL_OPT_SSL_ENFORCE turns on TLS.
+            // MYSQL_OPT_SSL_VERIFY_SERVER_CERT controls CA validation.
+            bool enforce = true;
+            mysql_optionsv(mysql_, MYSQL_OPT_SSL_ENFORCE, &enforce);
+            bool verify = c.ssl_verify_cert;
+            mysql_optionsv(mysql_, MYSQL_OPT_SSL_VERIFY_SERVER_CERT, &verify);
+        }
         if (!mysql_real_connect(mysql_,
                                 c.host.c_str(),
                                 c.user.c_str(),
@@ -136,6 +149,10 @@ public:
 
     bool ping() {
         return mysql_ping(mysql_) == 0;
+    }
+
+    uint64_t last_insert_id() {
+        return mysql_insert_id(mysql_);
     }
 
     // Escape a string for safe inclusion in a query literal. Caller still
