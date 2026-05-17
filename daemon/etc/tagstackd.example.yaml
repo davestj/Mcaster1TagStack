@@ -1,0 +1,48 @@
+# tagstackd.yaml — daemon runtime config
+#
+# Copy this to /var/www/tagstack.mcaster1.com/shared/etc/tagstackd.yaml
+# and fill in real values. The real file is gitignored and lives in
+# Capistrano's shared/ directory so it survives releases.
+
+server:
+  bind_addr: "0.0.0.0"
+  port: 9890                                  # public HTTPS
+  tls_cert: "/etc/letsencrypt/live/tagstack.mcaster1.com/fullchain.pem"
+  tls_key:  "/etc/letsencrypt/live/tagstack.mcaster1.com/privkey.pem"
+  hostname: "tagstack.mcaster1.com"
+
+# FastCGI bridge into PHP-FPM for the admin web UI
+phpfpm:
+  socket: "/run/php/php8.4-fpm.sock"
+  document_root: "/var/www/tagstack.mcaster1.com/current/web/public"
+  index: "index.php"
+
+database:
+  host: "127.0.0.1"
+  port: 3306
+  name: "mcaster1_tagstack"
+  user: "your_db_user_here"
+  pass: "your_db_password_here"
+
+# Keycloak SSO — uses the shared mcaster1 realm
+auth:
+  keycloak_realm_url: "https://auth.mcaster1.com/realms/mcaster1"
+  client_id: "tagstack-daemon"
+  client_secret: "your_keycloak_client_secret_here"
+  jwks_cache_ttl: 3600
+
+# Logging
+log:
+  level: "info"                               # debug | info | warn | error
+  path:  "/var/www/tagstack.mcaster1.com/shared/log/tagstackd.log"
+
+# Scheduler — cron-like rules driving polling and enrichment
+scheduler:
+  enabled: true
+  workers: 4
+
+# Multi-tenant station list — at least one for the daemon to boot
+stations:
+  - id: "demo-station"
+    name: "Demo Station"
+    timezone: "America/Los_Angeles"

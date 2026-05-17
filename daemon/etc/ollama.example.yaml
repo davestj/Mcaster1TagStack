@@ -1,0 +1,61 @@
+# ollama.yaml — Ollama integration config for the TagStack daemon.
+#
+# Maps logical features to specific personas/models. Ollama runs
+# locally on the daemon host at 127.0.0.1:11434.
+
+ollama:
+  endpoint: "http://127.0.0.1:11434"
+  timeout_seconds: 120
+
+# Feature → persona / model mapping. Each feature can override the
+# default model and parameters.
+features:
+
+  # Metadata enrichment: fill in missing context fields on a track
+  # using sparse signals (title + artist + album).
+  enrichment:
+    persona: "music-intel"
+    model: "command-r"
+    temperature: 0.4
+    max_tokens: 500
+
+  # Show-prep / talk-up copy generation.
+  show_prep:
+    persona: "teleprompter-feed"
+    model: "gemma2:9b"
+    temperature: 0.75
+    max_tokens: 350
+
+  # Podcast episode summarization.
+  podcast_summary:
+    persona: "podcast-cohost"
+    model: "llama3.1:8b"
+    temperature: 0.5
+    max_tokens: 800
+
+  # DJ break / station ID copy.
+  dj_break:
+    persona: "dj-axiom"
+    model: "dolphin3:8b"
+    temperature: 0.8
+    max_tokens: 200
+
+  # Semantic library search via embeddings.
+  semantic_search:
+    persona: null
+    model: "nomic-embed-text"
+    embedding_dim: 768
+
+  # Album-art / cover image analysis.
+  cover_vision:
+    persona: null
+    model: "qwen2.5vl:7b"
+    temperature: 0.2
+
+# Routing: when to actually call Ollama vs. fall back to deterministic
+# code paths. Enrichment for a track with full known metadata never
+# touches the LLM.
+routing:
+  enrichment_min_missing_fields: 2
+  show_prep_only_when_requested: true
+  podcast_min_episode_length_seconds: 120

@@ -1,0 +1,68 @@
+# ── Build outputs ──────────────────────────────────────────────────────────
+build/
+build-*/
+out/
+cmake-build-*/
+*.app/
+*.dmg
+*.pkg
+
+# ── Object / binary intermediates ──────────────────────────────────────────
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.exe
+*.lib
+*.a
+*.pdb
+*.idb
+
+# ── Editor / IDE ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.vs/
+*.swp
+*.swo
+.DS_Store
+.cache/
+.claude/
+
+# ── Real configs — NEVER commit. .example files are the committed templates.
+# Mirrors the pattern used across Mcaster1: <name>.yaml gitignored,
+# <name>.example.yaml committed.
+tagstackd.yaml
+tagstack.yaml
+ollama.yaml
+config.php
+secrets.yaml
+*.local.yaml
+*.local.php
+.env
+.env.*
+!.env.example
+
+# ── Logs ──────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── Generated artifacts ───────────────────────────────────────────────────
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ── Allow .example.* through (they ARE the committed templates) ───────────
+!*.example.yaml
+!*.example.yml
+!*.example.php
+!*.example.json
+!*.example.env
+
+# ── Reference-only artifacts (MFC legacy port reference, never goes here) ──
+__REFERENCE_ONLY__.md
+*.vcxproj
+*.vcxproj.filters
+*.sln
+*.rc
