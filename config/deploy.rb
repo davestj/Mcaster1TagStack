@@ -19,8 +19,8 @@ append :linked_files,
        "web/etc/config.php"
 
 append :linked_dirs,
-       "shared/log",
-       "shared/cache"
+       "log",
+       "cache"
 
 # What to deploy — daemon + web subset of the repo
 set :scm,          :git
