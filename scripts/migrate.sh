@@ -14,10 +14,24 @@ if [[ ! -f "$CONFIG" ]]; then
     exit 0
 fi
 
-DB_HOST=$(yq -r '.database.host // "127.0.0.1"' "$CONFIG" 2>/dev/null || echo 127.0.0.1)
-DB_NAME=$(yq -r '.database.name // "mcaster1_tagstack"' "$CONFIG" 2>/dev/null || echo mcaster1_tagstack)
-DB_USER=$(yq -r '.database.user'   "$CONFIG" 2>/dev/null || true)
-DB_PASS=$(yq -r '.database.pass'   "$CONFIG" 2>/dev/null || true)
+# Parse the yaml without yq — Python is on every box already.
+parse_yaml_field() {
+    local field="$1"
+    python3 -c "
+import sys, yaml
+try:
+    y = yaml.safe_load(open('$CONFIG'))
+    print((y.get('database') or {}).get('$field') or '')
+except Exception:
+    pass" 2>/dev/null
+}
+
+DB_HOST=$(parse_yaml_field host)
+DB_NAME=$(parse_yaml_field name)
+DB_USER=$(parse_yaml_field user)
+DB_PASS=$(parse_yaml_field pass)
+[[ -z "$DB_HOST" ]] && DB_HOST=127.0.0.1
+[[ -z "$DB_NAME" ]] && DB_NAME=mcaster1_tagstack
 
 if [[ -z "$DB_USER" || -z "$DB_PASS" || "$DB_USER" == "your_db_user_here" ]]; then
     echo "migrate: db credentials not configured in $CONFIG — skipping for now"

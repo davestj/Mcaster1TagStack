@@ -245,6 +245,190 @@ int main(int argc, char** argv) {
         }
     });
 
+    // ── GET /api/v1/now-playing/{station} ──
+    svr.Get(R"(/api/v1/now-playing/([A-Za-z0-9_-]+))",
+            [&cfg](const httplib::Request& req, httplib::Response& res) {
+        std::string station = req.matches[1];
+        try {
+            mcaster1::tagstack::db::Connection c;
+            c.connect(cfg.db);
+            std::string esc = c.escape(station);
+            auto rs = c.query(
+                "SELECT spin_id, title, artist, album, genre, duration_sec, "
+                "spin_started, isrc, mbid, label, cover_url, show_title, dj_name, updated_at "
+                "FROM now_playing WHERE station_id = '" + esc + "' LIMIT 1");
+
+            mcaster1::tagstack::db::Row row(nullptr, nullptr, 0);
+            if (!rs.next(row)) {
+                res.status = 404;
+                res.set_content(envelope_error("NOT_FOUND",
+                                  "no current spin for station '" + station + "'"),
+                                "application/json; charset=utf-8");
+                return;
+            }
+            std::ostringstream d;
+            d << "{\"station_id\":\"" << json_escape(station) << "\""
+              << ",\"spin_id\":\""    << json_escape(row.str(0)) << "\""
+              << ",\"title\":\""      << json_escape(row.str(1)) << "\""
+              << ",\"artist\":\""     << json_escape(row.str(2)) << "\""
+              << ",\"album\":\""      << json_escape(row.str(3)) << "\""
+              << ",\"genre\":\""      << json_escape(row.str(4)) << "\""
+              << ",\"duration_sec\":" << row.i32(5)
+              << ",\"spin_started\":\"" << json_escape(row.str(6)) << "\""
+              << ",\"isrc\":\""       << json_escape(row.str(7)) << "\""
+              << ",\"mbid\":\""       << json_escape(row.str(8)) << "\""
+              << ",\"label\":\""      << json_escape(row.str(9)) << "\""
+              << ",\"cover_url\":\""  << json_escape(row.str(10)) << "\""
+              << ",\"show_title\":\"" << json_escape(row.str(11)) << "\""
+              << ",\"dj_name\":\""    << json_escape(row.str(12)) << "\""
+              << ",\"updated_at\":\"" << json_escape(row.str(13)) << "\""
+              << "}";
+            res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("UPSTREAM", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── PUT /api/v1/now-playing/{station} ──
+    // Accepts a JSON body with title/artist/album/etc. Upserts now_playing
+    // and appends to spin_history. Minimal JSON parsing (string fields only)
+    // since we don't have nlohmann/json wired up yet — Phase 3 will use it
+    // properly. For now: tolerant key=value parsing of top-level strings.
+    svr.Put(R"(/api/v1/now-playing/([A-Za-z0-9_-]+))",
+            [&cfg](const httplib::Request& req, httplib::Response& res) {
+        std::string station = req.matches[1];
+        const std::string& body = req.body;
+
+        // Extract simple top-level string fields with a tolerant regex-ish parse.
+        auto extract = [&](const std::string& key) -> std::string {
+            std::string needle = "\"" + key + "\"";
+            auto p = body.find(needle);
+            if (p == std::string::npos) return "";
+            p = body.find(':', p);
+            if (p == std::string::npos) return "";
+            p = body.find('"', p);
+            if (p == std::string::npos) return "";
+            ++p;
+            std::string out;
+            while (p < body.size() && body[p] != '"') {
+                if (body[p] == '\\' && p + 1 < body.size()) {
+                    char n = body[p+1];
+                    if      (n == '"')  out += '"';
+                    else if (n == '\\') out += '\\';
+                    else if (n == 'n')  out += '\n';
+                    else if (n == 't')  out += '\t';
+                    else                out += n;
+                    p += 2;
+                } else {
+                    out += body[p++];
+                }
+            }
+            return out;
+        };
+        auto extract_int = [&](const std::string& key) -> int {
+            std::string needle = "\"" + key + "\"";
+            auto p = body.find(needle);
+            if (p == std::string::npos) return 0;
+            p = body.find(':', p);
+            if (p == std::string::npos) return 0;
+            ++p;
+            while (p < body.size() && (body[p] == ' ' || body[p] == '\t')) ++p;
+            std::string num;
+            while (p < body.size() && (std::isdigit(static_cast<unsigned char>(body[p])) || body[p] == '-')) {
+                num += body[p++];
+            }
+            return num.empty() ? 0 : std::stoi(num);
+        };
+
+        std::string spin_id      = extract("spin_id");
+        std::string title        = extract("title");
+        std::string artist       = extract("artist");
+        std::string album        = extract("album");
+        std::string genre        = extract("genre");
+        int         duration_sec = extract_int("duration_sec");
+        std::string spin_started = extract("spin_started");
+        std::string isrc         = extract("isrc");
+        std::string mbid         = extract("mbid");
+        std::string label        = extract("label");
+        std::string cover_url    = extract("cover_url");
+        std::string show_title   = extract("show_title");
+        std::string dj_name      = extract("dj_name");
+
+        if (spin_id.empty()) {
+            // Auto-generate a spin_id if the client didn't supply one
+            char buf[64];
+            auto t = std::chrono::system_clock::now().time_since_epoch();
+            auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t).count();
+            std::snprintf(buf, sizeof(buf), "auto-%lld", static_cast<long long>(ns));
+            spin_id = buf;
+        }
+
+        try {
+            mcaster1::tagstack::db::Connection c;
+            c.connect(cfg.db);
+            std::string sid = c.escape(station);
+
+            // Verify station exists
+            auto sc = c.query("SELECT 1 FROM stations WHERE id = '" + sid + "' LIMIT 1");
+            mcaster1::tagstack::db::Row r0(nullptr, nullptr, 0);
+            if (!sc.next(r0)) {
+                res.status = 404;
+                res.set_content(envelope_error("NOT_FOUND",
+                                "no station '" + station + "'"),
+                                "application/json; charset=utf-8");
+                return;
+            }
+
+            auto q = [&](const std::string& s) { return "'" + c.escape(s) + "'"; };
+            std::string spin_started_sql =
+                spin_started.empty() ? std::string("NOW(3)") : q(spin_started);
+
+            // Upsert into now_playing
+            std::ostringstream up;
+            up << "INSERT INTO now_playing "
+               << "(station_id, spin_id, title, artist, album, genre, duration_sec, "
+               << "spin_started, isrc, mbid, label, cover_url, show_title, dj_name) VALUES ("
+               << q(station) << "," << q(spin_id) << "," << q(title) << ","
+               << q(artist)  << "," << q(album)   << "," << q(genre) << ","
+               << duration_sec << "," << spin_started_sql << ","
+               << q(isrc)    << "," << q(mbid)    << "," << q(label) << ","
+               << q(cover_url) << "," << q(show_title) << "," << q(dj_name)
+               << ") ON DUPLICATE KEY UPDATE "
+               << "spin_id=VALUES(spin_id), title=VALUES(title), artist=VALUES(artist), "
+               << "album=VALUES(album), genre=VALUES(genre), duration_sec=VALUES(duration_sec), "
+               << "spin_started=VALUES(spin_started), isrc=VALUES(isrc), mbid=VALUES(mbid), "
+               << "label=VALUES(label), cover_url=VALUES(cover_url), show_title=VALUES(show_title), "
+               << "dj_name=VALUES(dj_name)";
+            c.exec(up.str());
+
+            // Append to spin_history
+            std::ostringstream sh;
+            sh << "INSERT INTO spin_history "
+               << "(station_id, spin_id, title, artist, album, genre, duration_sec, "
+               << "spin_started, isrc, mbid, label, cover_url, show_title, dj_name) VALUES ("
+               << q(station) << "," << q(spin_id) << "," << q(title) << ","
+               << q(artist)  << "," << q(album)   << "," << q(genre) << ","
+               << duration_sec << "," << spin_started_sql << ","
+               << q(isrc)    << "," << q(mbid)    << "," << q(label) << ","
+               << q(cover_url) << "," << q(show_title) << "," << q(dj_name)
+               << ")";
+            c.exec(sh.str());
+
+            std::ostringstream d;
+            d << "{\"station_id\":\"" << json_escape(station) << "\""
+              << ",\"spin_id\":\""    << json_escape(spin_id) << "\""
+              << ",\"accepted\":true}";
+            res.status = 200;
+            res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("UPSTREAM", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
     // ── / (landing) ──
     svr.Get("/", [&cfg](const httplib::Request&, httplib::Response& res) {
         std::ostringstream d;
@@ -254,7 +438,8 @@ int main(int argc, char** argv) {
           << ",\"endpoints\":["
           << "\"/api/v1/health\","
           << "\"/api/v1/version\","
-          << "\"/api/v1/stations\""
+          << "\"/api/v1/stations\","
+          << "\"/api/v1/now-playing/{station}\""
           << "]}";
         res.set_content(envelope(d.str()), "application/json; charset=utf-8");
     });
