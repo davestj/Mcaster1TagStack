@@ -1,19 +1,22 @@
 #include "Icy22Page.h"
+#include "ApiClient.h"
 
 #include <QCheckBox>
 #include <QComboBox>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QTabBar>
 #include <QTabWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
-Icy22Page::Icy22Page(QWidget* parent) : QWidget(parent) {
+Icy22Page::Icy22Page(ApiClient* api, QWidget* parent) : QWidget(parent), m_api(api) {
     auto* root = new QVBoxLayout(this);
 
     // Session tab bar (custom in v1; we use a plain QTabBar).
@@ -37,8 +40,12 @@ Icy22Page::Icy22Page(QWidget* parent) : QWidget(parent) {
     connect(btnDupSess, &QPushButton::clicked, this, &Icy22Page::onDuplicateSession);
     connect(btnDelSess, &QPushButton::clicked, this, &Icy22Page::onDeleteSession);
 
-    // Server + Mount pickers
+    // Station picker (loaded from /api/v1/me/stations) + legacy Server/Mount
     auto* targetRow = new QHBoxLayout();
+    targetRow->addWidget(new QLabel("Station:"));
+    m_stationCombo = new QComboBox();
+    m_stationCombo->setMinimumWidth(220);
+    targetRow->addWidget(m_stationCombo, 2);
     targetRow->addWidget(new QLabel("Server:"));
     m_serverCombo = new QComboBox();
     targetRow->addWidget(m_serverCombo, 2);
@@ -72,8 +79,41 @@ Icy22Page::Icy22Page(QWidget* parent) : QWidget(parent) {
     connect(m_btnQueue, &QPushButton::clicked, this, &Icy22Page::onQueue);
     connect(m_chkProduction, &QCheckBox::toggled, this, &Icy22Page::onProductionToggled);
 
-    m_statusLabel = new QLabel("No session selected.");
+    m_statusLabel = new QLabel("No station selected.");
     root->addWidget(m_statusLabel);
+
+    if (m_api) {
+        connect(m_api, &ApiClient::myStationsReceived,
+                this, &Icy22Page::onMyStationsReceived);
+        connect(m_api, &ApiClient::nowPlayingAccepted,
+                this, &Icy22Page::onNowPlayingAccepted);
+        QTimer::singleShot(0, this, &Icy22Page::refreshStations);
+    }
+}
+
+void Icy22Page::refreshStations() {
+    if (m_api) m_api->listMyStations();
+}
+
+void Icy22Page::onMyStationsReceived(const QJsonArray& stations) {
+    m_stationCombo->clear();
+    for (const auto& v : stations) {
+        auto o = v.toObject();
+        auto label = o.value("name").toString();
+        auto cs    = o.value("callsign").toString();
+        if (!cs.isEmpty()) label += " (" + cs + ")";
+        m_stationCombo->addItem(label, o.value("id").toString());
+    }
+    if (m_stationCombo->count() == 0) {
+        m_stationCombo->addItem("(no stations — create one in Settings → Servers)", "");
+        m_statusLabel->setText("You don't have any broadcast stations yet.");
+    } else {
+        m_statusLabel->setText(QString("%1 station(s) ready.").arg(m_stationCombo->count()));
+    }
+}
+
+void Icy22Page::onNowPlayingAccepted(const QString& stationId, const QString& spinId) {
+    m_statusLabel->setText(QString("Push accepted: station=%1 spin=%2").arg(stationId, spinId));
 }
 
 QWidget* Icy22Page::buildTabIdentity() {
@@ -194,7 +234,32 @@ void Icy22Page::onRenameSession()    { /* TODO: inline rename via QInputDialog *
 void Icy22Page::onDuplicateSession() { /* TODO: clone current session row */ }
 void Icy22Page::onDeleteSession()    { /* TODO: confirm + remove */ }
 void Icy22Page::onSave()  { /* TODO: persist into mcaster1_tagstack.meta_composer_sessions */ }
-void Icy22Page::onPush()  { /* TODO: IcyMetaPusher via libcurl (ICY 1.x GET or ICY 2.2 PUT) */ }
+
+void Icy22Page::onPush() {
+    if (!m_api) return;
+    QString sid = m_stationCombo->currentData().toString();
+    if (sid.isEmpty()) {
+        m_statusLabel->setText("Pick a station before pushing.");
+        return;
+    }
+    QString title  = m_trackTitle->text().trimmed();
+    if (title.isEmpty()) {
+        m_statusLabel->setText("Track title is required.");
+        return;
+    }
+    QJsonObject body;
+    body.insert("title",  title);
+    body.insert("artist", m_trackArtist->text().trimmed());
+    body.insert("album",  m_trackAlbum->text().trimmed());
+    if (!m_trackIsrc->text().trimmed().isEmpty())  body.insert("isrc",  m_trackIsrc->text().trimmed());
+    if (!m_trackMbid->text().trimmed().isEmpty())  body.insert("mbid",  m_trackMbid->text().trimmed());
+    if (!m_trackLabel->text().trimmed().isEmpty()) body.insert("label", m_trackLabel->text().trimmed());
+    if (!m_showTitle->text().trimmed().isEmpty())  body.insert("show_title", m_showTitle->text().trimmed());
+    if (!m_djName->text().trimmed().isEmpty())     body.insert("dj_name",    m_djName->text().trimmed());
+    m_statusLabel->setText("Pushing to " + sid + "…");
+    m_api->putNowPlaying(sid, body);
+}
+
 void Icy22Page::onQueue() { /* TODO: insert into icy_queue */ }
 void Icy22Page::onProductionToggled(bool on) {
     m_statusLabel->setText(on ? "Production mode ON" : "Production mode OFF");

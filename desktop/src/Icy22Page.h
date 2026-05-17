@@ -10,6 +10,7 @@
 // above the field tabs. Save / Push / Queue / Production Mode buttons below.
 
 #pragma once
+#include <QJsonArray>
 #include <QWidget>
 class QTabBar;
 class QTabWidget;
@@ -19,12 +20,14 @@ class QCheckBox;
 class QLineEdit;
 class QPlainTextEdit;
 class QLabel;
+class ApiClient;
 
 class Icy22Page : public QWidget {
     Q_OBJECT
 public:
-    explicit Icy22Page(QWidget* parent = nullptr);
+    explicit Icy22Page(ApiClient* api = nullptr, QWidget* parent = nullptr);
     void setSession(const QString& serverLabel, const QString& mount);
+    void refreshStations();
 
 private slots:
     void onNewSession();
@@ -35,6 +38,8 @@ private slots:
     void onPush();
     void onQueue();
     void onProductionToggled(bool on);
+    void onMyStationsReceived(const QJsonArray& stations);
+    void onNowPlayingAccepted(const QString& stationId, const QString& spinId);
 
 private:
     QWidget* buildTabIdentity();
@@ -42,9 +47,11 @@ private:
     QWidget* buildTabEngagement();
     QWidget* buildTabTechnical();
 
+    ApiClient*   m_api            = nullptr;
     QTabBar*     m_sessionBar     = nullptr;
     QComboBox*   m_serverCombo    = nullptr;
     QComboBox*   m_mountCombo     = nullptr;
+    QComboBox*   m_stationCombo   = nullptr;
     QTabWidget*  m_fieldTabs      = nullptr;
     QPushButton* m_btnSave        = nullptr;
     QPushButton* m_btnPush        = nullptr;

@@ -119,7 +119,7 @@ void MainWindow::buildContentStack() {
     m_pageDirectory     = new DirectoryPage(m_api);
     m_pageServers       = new ServersPage();
     m_pageMedia         = new MediaLibraryPage();
-    m_pageIcy22         = new Icy22Page();
+    m_pageIcy22         = new Icy22Page(m_api);
     m_pageLive          = new LiveStreamPage();
     m_pagePodcasts      = new PodcastsPage();
     m_pageSettings      = new SettingsPage();

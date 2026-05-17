@@ -222,6 +222,38 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    // ── Helper: auth a request and return ResolvedToken. Writes 401 on failure
+    //    and returns user_id=0; callers check user_id and `return` early.
+    //    Declared up here so every route below can capture it.
+    auto require_auth = [&cfg](const httplib::Request& req, httplib::Response& res)
+        -> mcaster1::tagstack::auth::ResolvedToken {
+        using namespace mcaster1::tagstack;
+        std::string token = auth::extract_bearer(req.get_header_value("Authorization"));
+        if (token.empty()) {
+            res.status = 401;
+            res.set_content(envelope_error("UNAUTHENTICATED", "missing bearer token"),
+                            "application/json; charset=utf-8");
+            return {};
+        }
+        try {
+            db::Connection tdb;
+            tdb.connect(cfg.db);
+            auto rt = auth::resolve_token(tdb, token);
+            if (rt.user_id == 0) {
+                res.status = 401;
+                res.set_content(envelope_error("UNAUTHENTICATED", "invalid or expired token"),
+                                "application/json; charset=utf-8");
+                return {};
+            }
+            return rt;
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+            return {};
+        }
+    };
+
     // ── /api/v1/health ──
     svr.Get("/api/v1/health", [&cfg, &db_ready](const httplib::Request&, httplib::Response& res) {
         // Re-check DB on each health call so the value is current.
@@ -336,11 +368,13 @@ int main(int argc, char** argv) {
 
     // ── PUT /api/v1/now-playing/{station} ──
     // Accepts a JSON body with title/artist/album/etc. Upserts now_playing
-    // and appends to spin_history. Minimal JSON parsing (string fields only)
-    // since we don't have nlohmann/json wired up yet — Phase 3 will use it
-    // properly. For now: tolerant key=value parsing of top-level strings.
+    // and appends to spin_history. Auth required since Phase 3c-3 —
+    // station ownership is honored: only the station's owner can push, or
+    // anyone if the station has no owner (NULL user_id, e.g. demo-station).
     svr.Put(R"(/api/v1/now-playing/([A-Za-z0-9_-]+))",
-            [&cfg](const httplib::Request& req, httplib::Response& res) {
+            [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
         std::string station = req.matches[1];
         const std::string& body = req.body;
 
@@ -413,8 +447,11 @@ int main(int argc, char** argv) {
             c.connect(cfg.db);
             std::string sid = c.escape(station);
 
-            // Verify station exists
-            auto sc = c.query("SELECT 1 FROM stations WHERE id = '" + sid + "' LIMIT 1");
+            // Verify station exists AND the user is allowed to push.
+            //   user_id NULL  → unowned (legacy / demo) → any authed user
+            //   user_id = me  → owner, allow
+            //   user_id ≠ me  → 403
+            auto sc = c.query("SELECT user_id FROM stations WHERE id = '" + sid + "' LIMIT 1");
             mcaster1::tagstack::db::Row r0(nullptr, nullptr, 0);
             if (!sc.next(r0)) {
                 res.status = 404;
@@ -422,6 +459,17 @@ int main(int argc, char** argv) {
                                 "no station '" + station + "'"),
                                 "application/json; charset=utf-8");
                 return;
+            }
+            auto owner_str = r0.str(0);
+            if (!owner_str.empty()) {
+                int owner = std::stoi(owner_str);
+                if (owner != static_cast<int>(rt.user_id)) {
+                    res.status = 403;
+                    res.set_content(envelope_error("FORBIDDEN",
+                                    "station belongs to another user"),
+                                    "application/json; charset=utf-8");
+                    return;
+                }
             }
 
             auto q = [&](const std::string& s) { return "'" + c.escape(s) + "'"; };
@@ -611,37 +659,6 @@ int main(int argc, char** argv) {
           << "}";
         res.set_content(envelope(d.str()), "application/json; charset=utf-8");
     });
-
-    // ── Helper: auth a request and return ResolvedToken. Writes 401 on failure
-    //    and returns user_id=0; callers check user_id and `return` early.
-    auto require_auth = [&cfg](const httplib::Request& req, httplib::Response& res)
-        -> mcaster1::tagstack::auth::ResolvedToken {
-        using namespace mcaster1::tagstack;
-        std::string token = auth::extract_bearer(req.get_header_value("Authorization"));
-        if (token.empty()) {
-            res.status = 401;
-            res.set_content(envelope_error("UNAUTHENTICATED", "missing bearer token"),
-                            "application/json; charset=utf-8");
-            return {};
-        }
-        try {
-            db::Connection tdb;
-            tdb.connect(cfg.db);
-            auto rt = auth::resolve_token(tdb, token);
-            if (rt.user_id == 0) {
-                res.status = 401;
-                res.set_content(envelope_error("UNAUTHENTICATED", "invalid or expired token"),
-                                "application/json; charset=utf-8");
-                return {};
-            }
-            return rt;
-        } catch (const std::exception& e) {
-            res.status = 503;
-            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
-                            "application/json; charset=utf-8");
-            return {};
-        }
-    };
 
     // ── POST /api/v1/auth/login ──
     svr.Post("/api/v1/auth/login", [&cfg](const httplib::Request& req, httplib::Response& res) {
@@ -1330,6 +1347,266 @@ int main(int argc, char** argv) {
         }
     });
 
+    // ── GET /api/v1/me/stations ──
+    // Lists broadcast stations owned by the bearer's user. Unowned stations
+    // (demo-station, etc.) are NOT included — see /api/v1/stations for the
+    // unfiltered list.
+    svr.Get("/api/v1/me/stations", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            std::ostringstream sql;
+            sql << "SELECT id, name, callsign, COALESCE(description,''), timezone, "
+                << "       COALESCE(website_url,''), COALESCE(logo_url,''), "
+                << "       COALESCE(genre_primary,''), COALESCE(market,''), "
+                << "       COALESCE(license_class,''), verified, active, "
+                << "       UNIX_TIMESTAMP(created_at), UNIX_TIMESTAMP(updated_at) "
+                << "FROM stations WHERE user_id = " << rt.user_id
+                << " ORDER BY name";
+            auto r = tdb.query(sql.str());
+            std::ostringstream out; out << "[";
+            bool first = true;
+            mcaster1::tagstack::db::Row row(nullptr, nullptr, 0);
+            while (r.next(row)) {
+                if (!first) out << ",";
+                first = false;
+                out << "{\"id\":\""           << json_escape(row.str(0))  << "\""
+                    << ",\"name\":\""         << json_escape(row.str(1))  << "\""
+                    << ",\"callsign\":\""     << json_escape(row.str(2))  << "\""
+                    << ",\"description\":\""  << json_escape(row.str(3))  << "\""
+                    << ",\"timezone\":\""     << json_escape(row.str(4))  << "\""
+                    << ",\"website_url\":\""  << json_escape(row.str(5))  << "\""
+                    << ",\"logo_url\":\""     << json_escape(row.str(6))  << "\""
+                    << ",\"genre_primary\":\""<< json_escape(row.str(7))  << "\""
+                    << ",\"market\":\""       << json_escape(row.str(8))  << "\""
+                    << ",\"license_class\":\""<< json_escape(row.str(9))  << "\""
+                    << ",\"verified\":"       << (row.boolean(10) ? "true" : "false")
+                    << ",\"active\":"         << (row.boolean(11) ? "true" : "false")
+                    << ",\"created_at\":"     << row.i64(12)
+                    << ",\"updated_at\":"     << row.i64(13)
+                    << "}";
+            }
+            out << "]";
+            res.set_content(envelope(out.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── POST /api/v1/me/stations ──
+    // Body: { "id": "...", "name": "...", "callsign", "description",
+    //         "timezone", "website_url", "logo_url", "genre_primary",
+    //         "market", "license_class" }. id is the slug; if empty, derived
+    //         from name. Owner is the bearer.
+    svr.Post("/api/v1/me/stations", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        auto extract = [&](const std::string& key) -> std::string {
+            const auto& body = req.body;
+            std::string needle = "\"" + key + "\"";
+            auto p = body.find(needle);
+            if (p == std::string::npos) return "";
+            p = body.find(':', p);
+            if (p == std::string::npos) return "";
+            p = body.find('"', p);
+            if (p == std::string::npos) return "";
+            ++p;
+            std::string out;
+            while (p < body.size() && body[p] != '"') {
+                if (body[p] == '\\' && p + 1 < body.size()) { out += body[p+1]; p += 2; }
+                else out += body[p++];
+            }
+            return out;
+        };
+        std::string id          = extract("id");
+        std::string name        = extract("name");
+        std::string callsign    = extract("callsign");
+        std::string description = extract("description");
+        std::string timezone    = extract("timezone");
+        std::string website_url = extract("website_url");
+        std::string logo_url    = extract("logo_url");
+        std::string genre       = extract("genre_primary");
+        std::string market      = extract("market");
+        std::string license     = extract("license_class");
+
+        if (name.empty()) {
+            res.status = 400;
+            res.set_content(envelope_error("VALIDATION", "'name' is required"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+        // Derive id from name if not supplied: lowercase, non-alphanum → '-'.
+        if (id.empty()) {
+            for (char c : name) {
+                if      (std::isalnum(static_cast<unsigned char>(c))) id += std::tolower(c);
+                else if (!id.empty() && id.back() != '-')            id += '-';
+            }
+            while (!id.empty() && id.back() == '-') id.pop_back();
+            if (id.empty()) id = "station";
+        }
+        if (timezone.empty()) timezone = "America/Los_Angeles";
+
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            auto q = [&](const std::string& s) {
+                return s.empty() ? std::string("NULL") : ("'" + tdb.escape(s) + "'");
+            };
+            std::ostringstream sql;
+            sql << "INSERT INTO stations (id, user_id, name, callsign, description, "
+                << "  timezone, website_url, logo_url, genre_primary, market, "
+                << "  license_class, verified, active) VALUES ("
+                << "'" << tdb.escape(id) << "',"
+                << rt.user_id << ","
+                << "'" << tdb.escape(name) << "',"
+                << q(callsign)    << ","
+                << q(description) << ","
+                << "'" << tdb.escape(timezone) << "',"
+                << q(website_url) << ","
+                << q(logo_url)    << ","
+                << q(genre)       << ","
+                << q(market)      << ","
+                << q(license)     << ","
+                << "0, 1)";
+            try {
+                tdb.exec(sql.str());
+            } catch (const std::exception& e) {
+                // Duplicate id → 409
+                std::string what = e.what();
+                if (what.find("Duplicate") != std::string::npos) {
+                    res.status = 409;
+                    res.set_content(envelope_error("CONFLICT",
+                        "station id '" + id + "' already exists"),
+                        "application/json; charset=utf-8");
+                    return;
+                }
+                throw;
+            }
+            std::ostringstream d;
+            d << "{\"id\":\"" << json_escape(id) << "\""
+              << ",\"name\":\"" << json_escape(name) << "\""
+              << ",\"created\":true}";
+            res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── PUT /api/v1/me/stations/:id ──
+    // Updates one of my stations. Only the fields present in the body are
+    // changed. 404 if not mine.
+    svr.Put("/api/v1/me/stations/:id", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        std::string id = req.path_params.at("id");
+        auto extract = [&](const std::string& key) -> std::pair<bool, std::string> {
+            const auto& body = req.body;
+            std::string needle = "\"" + key + "\"";
+            auto p = body.find(needle);
+            if (p == std::string::npos) return {false, ""};
+            p = body.find(':', p);
+            if (p == std::string::npos) return {false, ""};
+            p = body.find('"', p);
+            if (p == std::string::npos) return {false, ""};
+            ++p;
+            std::string out;
+            while (p < body.size() && body[p] != '"') {
+                if (body[p] == '\\' && p + 1 < body.size()) { out += body[p+1]; p += 2; }
+                else out += body[p++];
+            }
+            return {true, out};
+        };
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            auto eid = tdb.escape(id);
+            // Confirm ownership.
+            auto own = tdb.query(
+                "SELECT user_id FROM stations WHERE id='" + eid + "' LIMIT 1");
+            mcaster1::tagstack::db::Row r0(nullptr, nullptr, 0);
+            if (!own.next(r0) || r0.str(0).empty() ||
+                std::stoi(r0.str(0)) != static_cast<int>(rt.user_id)) {
+                res.status = 404;
+                res.set_content(envelope_error("NOT_FOUND",
+                    "no station '" + id + "' owned by you"),
+                    "application/json; charset=utf-8");
+                return;
+            }
+            std::ostringstream sets;
+            bool any = false;
+            auto setIfPresent = [&](const std::string& key, const std::string& col) {
+                auto [present, v] = extract(key);
+                if (!present) return;
+                if (any) sets << ", ";
+                sets << col << "='" << tdb.escape(v) << "'";
+                any = true;
+            };
+            setIfPresent("name",          "name");
+            setIfPresent("callsign",      "callsign");
+            setIfPresent("description",   "description");
+            setIfPresent("timezone",      "timezone");
+            setIfPresent("website_url",   "website_url");
+            setIfPresent("logo_url",      "logo_url");
+            setIfPresent("genre_primary", "genre_primary");
+            setIfPresent("market",        "market");
+            setIfPresent("license_class", "license_class");
+            if (!any) {
+                res.status = 400;
+                res.set_content(envelope_error("VALIDATION",
+                    "no editable fields supplied"),
+                    "application/json; charset=utf-8");
+                return;
+            }
+            std::ostringstream sql;
+            sql << "UPDATE stations SET " << sets.str()
+                << " WHERE id='" << eid << "'";
+            auto n = tdb.exec(sql.str());
+            std::ostringstream d;
+            d << "{\"id\":\"" << json_escape(id) << "\",\"updated\":" << n << "}";
+            res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── DELETE /api/v1/me/stations/:id ──
+    svr.Delete("/api/v1/me/stations/:id", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            std::string id = req.path_params.at("id");
+            auto eid = tdb.escape(id);
+            std::ostringstream sql;
+            sql << "DELETE FROM stations WHERE id='" << eid << "'"
+                << " AND user_id=" << rt.user_id;
+            auto n = tdb.exec(sql.str());
+            if (n == 0) {
+                res.status = 404;
+                res.set_content(envelope_error("NOT_FOUND",
+                    "no station '" + id + "' owned by you"),
+                    "application/json; charset=utf-8");
+                return;
+            }
+            std::ostringstream d;
+            d << "{\"id\":\"" << json_escape(id) << "\",\"deleted\":" << n << "}";
+            res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
     // ── POST /api/v1/admin/yp/refresh ──
     // Admin-only: kicks an immediate YP ingest. Admin = cc_user_link.account_type='admin'
     // OR cc_usergroupid IN (6=Administrators, 5=Super Moderators).
@@ -1383,6 +1660,10 @@ int main(int argc, char** argv) {
           << "\"DELETE /api/v1/me/social/{platform}\","
           << "\"POST /api/v1/me/social/push\","
           << "\"GET /api/v1/me/social/queue\","
+          << "\"GET /api/v1/me/stations\","
+          << "\"POST /api/v1/me/stations\","
+          << "\"PUT /api/v1/me/stations/{id}\","
+          << "\"DELETE /api/v1/me/stations/{id}\","
           << "\"POST /api/v1/admin/yp/refresh\","
           << "\"GET /api/v1/now-playing/{station}\","
           << "\"PUT /api/v1/now-playing/{station}\","

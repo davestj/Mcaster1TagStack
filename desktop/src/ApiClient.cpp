@@ -220,6 +220,59 @@ void ApiClient::trendingTags(const QString& window) {
     });
 }
 
+// ─── My broadcast stations ────────────────────────────────────────────────
+
+void ApiClient::listMyStations() {
+    auto* r = doGet("/api/v1/me/stations", "station.list");
+    handleReply(r, "station.list", [this](const QJsonObject& env) {
+        emit myStationsReceived(env.value("data").toArray());
+    });
+}
+
+void ApiClient::createMyStation(const QJsonObject& payload) {
+    auto* r = doPost("/api/v1/me/stations",
+                     QJsonDocument(payload).toJson(QJsonDocument::Compact),
+                     "station.create");
+    handleReply(r, "station.create", [this](const QJsonObject& env) {
+        auto d = env.value("data").toObject();
+        emit myStationCreated(d.value("id").toString(), d.value("name").toString());
+    });
+}
+
+void ApiClient::updateMyStation(const QString& stationId, const QJsonObject& payload) {
+    QNetworkRequest req((QUrl(m_baseUrl + "/api/v1/me/stations/" + stationId)));
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    if (!m_token.isEmpty())
+        req.setRawHeader("Authorization", ("Bearer " + m_token).toUtf8());
+    auto body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
+    auto* reply = m_nam->sendCustomRequest(req, "PUT", body);
+    handleReply(reply, "station.update", [this, stationId](const QJsonObject& env) {
+        emit myStationUpdated(stationId,
+            env.value("data").toObject().value("updated").toInt());
+    });
+}
+
+void ApiClient::deleteMyStation(const QString& stationId) {
+    auto* r = doDelete("/api/v1/me/stations/" + stationId, "station.delete");
+    handleReply(r, "station.delete", [this, stationId](const QJsonObject& env) {
+        emit myStationDeleted(stationId,
+            env.value("data").toObject().value("deleted").toInt());
+    });
+}
+
+void ApiClient::putNowPlaying(const QString& stationId, const QJsonObject& spin) {
+    QNetworkRequest req((QUrl(m_baseUrl + "/api/v1/now-playing/" + stationId)));
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    if (!m_token.isEmpty())
+        req.setRawHeader("Authorization", ("Bearer " + m_token).toUtf8());
+    auto body = QJsonDocument(spin).toJson(QJsonDocument::Compact);
+    auto* reply = m_nam->sendCustomRequest(req, "PUT", body);
+    handleReply(reply, "nowplaying.put", [this, stationId](const QJsonObject& env) {
+        auto d = env.value("data").toObject();
+        emit nowPlayingAccepted(stationId, d.value("spin_id").toString());
+    });
+}
+
 // ─── Social ───────────────────────────────────────────────────────────────
 
 void ApiClient::listMySocial() {

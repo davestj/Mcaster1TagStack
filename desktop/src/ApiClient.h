@@ -58,6 +58,13 @@ public:
     void listStationTagCloud(const QString& stationId);
     void trendingTags(const QString& window = "24h");
 
+    // ── My broadcast stations ─────────────────────────────────────────────
+    void listMyStations();
+    void createMyStation(const QJsonObject& payload);
+    void updateMyStation(const QString& stationId, const QJsonObject& payload);
+    void deleteMyStation(const QString& stationId);
+    void putNowPlaying(const QString& stationId, const QJsonObject& spin);
+
     // ── Social ────────────────────────────────────────────────────────────
     void listMySocial();
     void deleteSocial(const QString& platform);
@@ -87,6 +94,13 @@ signals:
     void tagDeleted(const QString& stationId, const QString& tag, int deleted);
     void stationTagCloudReceived(const QString& stationId, const QJsonArray& cloud);
     void trendingReceived(const QJsonArray& trending);
+
+    // My broadcast stations
+    void myStationsReceived(const QJsonArray& stations);
+    void myStationCreated(const QString& stationId, const QString& name);
+    void myStationUpdated(const QString& stationId, int updated);
+    void myStationDeleted(const QString& stationId, int deleted);
+    void nowPlayingAccepted(const QString& stationId, const QString& spinId);
 
     // Social
     void socialListReceived(const QJsonArray& accounts);
