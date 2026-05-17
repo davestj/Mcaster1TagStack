@@ -2,6 +2,8 @@
 
 #include "MainWindow.h"
 
+#include "ApiClient.h"
+#include "DirectoryPage.h"
 #include "ServersPage.h"
 #include "MediaLibraryPage.h"
 #include "Icy22Page.h"
@@ -14,6 +16,7 @@
 #include "EventsPage.h"
 
 #include <QHBoxLayout>
+#include <QJsonObject>
 #include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
@@ -29,6 +32,7 @@ namespace {
 // "1-based" thing and let QListWidget rows be 0-based.
 struct NavItem { const char* label; };
 constexpr NavItem kNavItems[] = {
+    {"Directory"},      // new: YP station directory + tagging
     {"Servers"},
     {"Media"},
     {"ICY 2.2"},
@@ -43,9 +47,14 @@ constexpr NavItem kNavItems[] = {
 
 }  // namespace
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
+MainWindow::MainWindow(ApiClient* api, QWidget* parent)
+    : QMainWindow(parent), m_api(api) {
     setWindowTitle("Mcaster1 TagStack");
-    resize(1200, 800);
+    resize(1280, 820);
+
+    // /me on launch — also keeps the player strip + status bar fresh.
+    connect(m_api, &ApiClient::meReceived, this, &MainWindow::onMeReceived);
+    m_api->me();
 
     auto* central = new QWidget(this);
     auto* outer   = new QVBoxLayout(central);
@@ -81,10 +90,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     setCentralWidget(central);
 
-    m_statusLabel = new QLabel("Not connected", this);
+    m_statusLabel = new QLabel("Signed in as: " + m_api->currentUser(), this);
     statusBar()->addPermanentWidget(m_statusLabel);
+    m_logoutBtn = new QPushButton("Sign out");
+    statusBar()->addPermanentWidget(m_logoutBtn);
+    connect(m_logoutBtn, &QPushButton::clicked, this, &MainWindow::onLogoutClicked);
 
-    // Default selection: Servers.
+    // Default selection: Directory (the new headline experience).
     m_nav->setCurrentRow(0);
 }
 
@@ -104,6 +116,7 @@ void MainWindow::buildNavPanel() {
 
 void MainWindow::buildContentStack() {
     m_stack = new QStackedWidget();
+    m_pageDirectory     = new DirectoryPage(m_api);
     m_pageServers       = new ServersPage();
     m_pageMedia         = new MediaLibraryPage();
     m_pageIcy22         = new Icy22Page();
@@ -115,6 +128,7 @@ void MainWindow::buildContentStack() {
     m_pageDataQueue     = new DataQueuePage();
     m_pageEvents        = new EventsPage();
     // Order MUST match kNavItems[].
+    m_stack->addWidget(m_pageDirectory);
     m_stack->addWidget(m_pageServers);
     m_stack->addWidget(m_pageMedia);
     m_stack->addWidget(m_pageIcy22);
@@ -144,4 +158,17 @@ void MainWindow::setActiveSession(const QString& serverLabel, const QString& mou
     // Phase 3+: propagate to m_pageIcy22 / m_pageLive / m_pageSocialcasting
     //          via their setSession() methods, matching v1's
     //          CMainFrame::SetActiveSession() dispatch.
+}
+
+void MainWindow::onLogoutClicked() {
+    m_api->logout();
+    m_api->clearToken();
+    // Tear down the window; main.cpp re-enters the login loop.
+    close();
+}
+
+void MainWindow::onMeReceived(const QJsonObject& user) {
+    auto name = user.value("display_name").toString();
+    if (name.isEmpty()) name = user.value("username").toString();
+    m_statusLabel->setText("Signed in as: " + name);
 }

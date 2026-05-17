@@ -5,7 +5,10 @@ bin_PROGRAMS = tagstack-desktop
 # Hand-written sources.
 tagstack_desktop_SOURCES = \
     main.cpp \
+    ApiClient.cpp \
+    LoginDialog.cpp \
     MainWindow.cpp \
+    DirectoryPage.cpp \
     ServersPage.cpp \
     MediaLibraryPage.cpp \
     Icy22Page.cpp \
@@ -27,7 +30,10 @@ tagstack_desktop_SOURCES = \
 # be built before the .cpp files compile because the .cpp files include them
 # transitively via Qt's signal/slot machinery.
 nodist_tagstack_desktop_SOURCES = \
+    moc_ApiClient.cpp \
+    moc_LoginDialog.cpp \
     moc_MainWindow.cpp \
+    moc_DirectoryPage.cpp \
     moc_ServersPage.cpp \
     moc_MediaLibraryPage.cpp \
     moc_Icy22Page.cpp \

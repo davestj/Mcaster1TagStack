@@ -1,12 +1,20 @@
 // main.cpp — Mcaster1 TagStack desktop entry point.
 //
-// Uses Qt's default native style (no QStyle override, no QPalette tweaks,
-// no stylesheet). On macOS that's the native Cocoa look, on Linux Fusion,
-// on Windows native. Theme work is out of scope for this phase.
+// Lifecycle:
+//   1. Construct ApiClient, point it at https://tagstack.mcaster1.com:9890.
+//   2. If a token is cached in QSettings, jump straight to MainWindow.
+//   3. Otherwise show LoginDialog modally; on Accept proceed to MainWindow.
+//   4. From MainWindow, "Sign out" closes the window — main.cpp loops back
+//      to step 2 so the next session starts cleanly.
+//
+// Default Qt native theme is used — no QStyle/QPalette/stylesheet overrides.
 
+#include "ApiClient.h"
+#include "LoginDialog.h"
 #include "MainWindow.h"
 
 #include <QApplication>
+#include <QDialog>
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
@@ -14,7 +22,22 @@ int main(int argc, char** argv) {
     QApplication::setOrganizationName("Mcaster1");
     QApplication::setOrganizationDomain("mcaster1.com");
 
-    MainWindow w;
-    w.show();
-    return app.exec();
+    ApiClient api;
+
+    while (true) {
+        if (!api.hasToken()) api.restoreToken();
+        if (!api.hasToken()) {
+            LoginDialog dlg(&api);
+            if (dlg.exec() != QDialog::Accepted) {
+                return 0;  // user cancelled / quit
+            }
+        }
+
+        MainWindow w(&api);
+        w.show();
+        int rc = app.exec();
+        if (rc != 0) return rc;
+        if (!api.hasToken()) continue;  // signed out — loop back to login
+        return 0;                       // window closed while still signed in
+    }
 }

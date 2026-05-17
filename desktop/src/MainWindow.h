@@ -31,6 +31,8 @@ class QStackedWidget;
 class QLabel;
 class QPushButton;
 
+class ApiClient;
+class DirectoryPage;
 class ServersPage;
 class MediaLibraryPage;
 class Icy22Page;
@@ -46,7 +48,7 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget* parent = nullptr);
+    explicit MainWindow(ApiClient* api, QWidget* parent = nullptr);
     ~MainWindow() override;
 
     // Mirror of CMainFrame::SetActiveSession(ServerConfig, mount). The server
@@ -56,20 +58,25 @@ public:
 
 private slots:
     void onNavChanged(int row);
+    void onLogoutClicked();
+    void onMeReceived(const QJsonObject& user);
 
 private:
     void buildNavPanel();
     void buildContentStack();
     void buildPlayerStrip();
 
+    ApiClient*      m_api         = nullptr;
     QListWidget*    m_nav         = nullptr;
     QStackedWidget* m_stack       = nullptr;
     QLabel*         m_playerInfo  = nullptr;
     QPushButton*    m_playerPlay  = nullptr;
     QPushButton*    m_playerStop  = nullptr;
+    QPushButton*    m_logoutBtn   = nullptr;
     QLabel*         m_statusLabel = nullptr;
 
-    // Pages owned by m_stack, mirroring the NAV_* enum from v1.
+    // Pages owned by m_stack — order must match nav row order.
+    DirectoryPage*     m_pageDirectory     = nullptr;
     ServersPage*       m_pageServers       = nullptr;
     MediaLibraryPage*  m_pageMedia         = nullptr;
     Icy22Page*         m_pageIcy22         = nullptr;
