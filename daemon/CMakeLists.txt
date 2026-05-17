@@ -16,11 +16,18 @@ find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED)
 
-# yaml-cpp's CMake support varies; try find_package first, fall back to pkg-config
+# yaml-cpp — CMake support varies; try find_package first, fall back to pkg-config
 find_package(yaml-cpp QUIET)
 if(NOT yaml-cpp_FOUND)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(YAMLCPP REQUIRED yaml-cpp)
+endif()
+
+# MariaDB / MySQL client — Debian ships libmariadb-dev with mariadb_config
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(MARIADB libmariadb)
+if(NOT MARIADB_FOUND)
+    pkg_check_modules(MARIADB REQUIRED mariadb)
 endif()
 
 # ── Target ─────────────────────────────────────────────────────────────────
@@ -31,6 +38,7 @@ add_executable(tagstackd
 target_include_directories(tagstackd PRIVATE
     include
     ${YAMLCPP_INCLUDE_DIRS}
+    ${MARIADB_INCLUDE_DIRS}
 )
 
 target_link_libraries(tagstackd PRIVATE
@@ -38,7 +46,10 @@ target_link_libraries(tagstackd PRIVATE
     CURL::libcurl
     OpenSSL::SSL
     OpenSSL::Crypto
+    ${MARIADB_LIBRARIES}
 )
+
+target_link_directories(tagstackd PRIVATE ${MARIADB_LIBRARY_DIRS})
 
 if(yaml-cpp_FOUND)
     target_link_libraries(tagstackd PRIVATE yaml-cpp)

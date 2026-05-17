@@ -1,16 +1,13 @@
 // main.cpp — tagstackd entry point.
 //
-// Phase 2 MVP: TLS-terminated HTTPS server on the configured port,
-// serves /api/v1/health and /api/v1/version. Reads config from a YAML
-// file passed on the command line.
-//
-// Future phases add: MariaDB connection, Keycloak verification, the
-// rest of the REST API, FastCGI bridge, WebSocket, scheduler, Ollama
-// proxy, social distribution.
+// Phase 2b MVP: TLS-terminated HTTPS server with the JSON API contract
+// envelope, MariaDB-backed /api/v1/stations endpoint plus the existing
+// /health and /version. Reads config from a YAML file passed via --config.
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 
 #include "httplib.h"
+#include "db.hpp"
 
 #include <yaml-cpp/yaml.h>
 
@@ -20,6 +17,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -57,6 +55,7 @@ struct DaemonConfig {
     std::string tls_key;
     std::string hostname  = "tagstack.mcaster1.com";
     std::string log_level = "info";
+    mcaster1::tagstack::db::Config db;
 };
 
 DaemonConfig load_config(const std::string& path) {
@@ -73,6 +72,13 @@ DaemonConfig load_config(const std::string& path) {
         if (auto l = y["log"]; l && l["level"]) {
             c.log_level = l["level"].as<std::string>();
         }
+        if (auto d = y["database"]) {
+            if (d["host"]) c.db.host = d["host"].as<std::string>();
+            if (d["port"]) c.db.port = d["port"].as<int>();
+            if (d["name"]) c.db.name = d["name"].as<std::string>();
+            if (d["user"]) c.db.user = d["user"].as<std::string>();
+            if (d["pass"]) c.db.pass = d["pass"].as<std::string>();
+        }
     } catch (const std::exception& e) {
         std::cerr << "[tagstackd] config load failed: " << e.what() << "\n";
         std::exit(2);
@@ -84,7 +90,7 @@ DaemonConfig load_config(const std::string& path) {
     return c;
 }
 
-// Build the standard JSON envelope: { "data": ..., "meta": {...}, "errors": [] }
+// JSON envelope: { "data": ..., "meta": {...}, "errors": [] }
 std::string envelope(const std::string& data_json) {
     std::ostringstream o;
     o << "{\"data\":" << data_json
@@ -93,12 +99,46 @@ std::string envelope(const std::string& data_json) {
     return o.str();
 }
 
+std::string envelope_error(const std::string& code, const std::string& message,
+                           const std::string& extra_meta = "") {
+    std::ostringstream o;
+    o << "{\"data\":null"
+      << ",\"meta\":{\"server_time\":\"" << iso8601_now() << "\"" << extra_meta << "}"
+      << ",\"errors\":[{\"code\":\"" << code << "\",\"message\":\"" << message << "\"}]}";
+    return o.str();
+}
+
+// Escape a string for JSON output (handles ", \, control chars).
+std::string json_escape(const std::string& s) {
+    std::ostringstream o;
+    for (char c : s) {
+        switch (c) {
+            case '"':  o << "\\\""; break;
+            case '\\': o << "\\\\"; break;
+            case '\b': o << "\\b";  break;
+            case '\f': o << "\\f";  break;
+            case '\n': o << "\\n";  break;
+            case '\r': o << "\\r";  break;
+            case '\t': o << "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    o << buf;
+                } else {
+                    o << c;
+                }
+        }
+    }
+    return o.str();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     install_signal_handlers();
 
-    std::string config_path = "/var/www/tagstack.mcaster1.com/shared/etc/tagstackd.yaml";
+    std::string config_path = "/var/www/tagstack.mcaster1.com/current/daemon/etc/tagstackd.yaml";
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if ((a == "--config" || a == "-c") && i + 1 < argc) {
@@ -115,22 +155,50 @@ int main(int argc, char** argv) {
 
     DaemonConfig cfg = load_config(config_path);
 
+    // Try a startup DB ping — surfaces config issues at boot, doesn't abort
+    // if DB is just temporarily unavailable.
+    bool db_ready = false;
+    if (!cfg.db.name.empty() && !cfg.db.user.empty()) {
+        try {
+            mcaster1::tagstack::db::Connection probe;
+            probe.connect(cfg.db);
+            db_ready = probe.ping();
+            std::cerr << "[tagstackd] DB ping: " << (db_ready ? "ok" : "fail")
+                      << " (" << cfg.db.host << ":" << cfg.db.port
+                      << "/" << cfg.db.name << " as " << cfg.db.user << ")\n";
+        } catch (const std::exception& e) {
+            std::cerr << "[tagstackd] DB probe error: " << e.what() << "\n";
+        }
+    } else {
+        std::cerr << "[tagstackd] DB not configured — endpoints requiring DB will return 503\n";
+    }
+
     httplib::SSLServer svr(cfg.tls_cert.c_str(), cfg.tls_key.c_str());
     if (!svr.is_valid()) {
         std::cerr << "[tagstackd] SSLServer not valid — check cert/key paths and permissions\n";
         return 2;
     }
 
-    // ── Route: /api/v1/health ──
-    svr.Get("/api/v1/health", [](const httplib::Request&, httplib::Response& res) {
+    // ── /api/v1/health ──
+    svr.Get("/api/v1/health", [&cfg, &db_ready](const httplib::Request&, httplib::Response& res) {
+        // Re-check DB on each health call so the value is current.
+        bool now_ok = db_ready;
+        if (!cfg.db.name.empty()) {
+            try {
+                mcaster1::tagstack::db::Connection c;
+                c.connect(cfg.db);
+                now_ok = c.ping();
+            } catch (...) { now_ok = false; }
+        }
         std::ostringstream d;
         d << "{\"ok\":true"
           << ",\"version\":\"" << kVersion << "\""
-          << ",\"name\":\"tagstackd\"}";
+          << ",\"name\":\"tagstackd\""
+          << ",\"db_ok\":" << (now_ok ? "true" : "false") << "}";
         res.set_content(envelope(d.str()), "application/json; charset=utf-8");
     });
 
-    // ── Route: /api/v1/version ──
+    // ── /api/v1/version ──
     svr.Get("/api/v1/version", [](const httplib::Request&, httplib::Response& res) {
         std::ostringstream d;
         d << "{\"version\":\"" << kVersion << "\""
@@ -139,28 +207,68 @@ int main(int argc, char** argv) {
         res.set_content(envelope(d.str()), "application/json; charset=utf-8");
     });
 
-    // ── Route: / (landing — Phase 4 will move this into FastCGI) ──
+    // ── /api/v1/stations ──
+    svr.Get("/api/v1/stations", [&cfg](const httplib::Request&, httplib::Response& res) {
+        try {
+            mcaster1::tagstack::db::Connection c;
+            c.connect(cfg.db);
+            auto rs = c.query("SELECT id, name, callsign, description, timezone, "
+                              "market, license_class, verified, active, created_at "
+                              "FROM stations WHERE active = 1 ORDER BY name");
+
+            std::ostringstream out;
+            out << "[";
+            mcaster1::tagstack::db::Row row(nullptr, nullptr, 0);
+            bool first = true;
+            while (rs.next(row)) {
+                if (!first) out << ",";
+                first = false;
+                out << "{"
+                    << "\"id\":\""            << json_escape(row.str(0)) << "\""
+                    << ",\"name\":\""         << json_escape(row.str(1)) << "\""
+                    << ",\"callsign\":\""     << json_escape(row.str(2)) << "\""
+                    << ",\"description\":\""  << json_escape(row.str(3)) << "\""
+                    << ",\"timezone\":\""     << json_escape(row.str(4)) << "\""
+                    << ",\"market\":\""       << json_escape(row.str(5)) << "\""
+                    << ",\"license_class\":\""<< json_escape(row.str(6)) << "\""
+                    << ",\"verified\":"       << (row.boolean(7) ? "true" : "false")
+                    << ",\"active\":"         << (row.boolean(8) ? "true" : "false")
+                    << ",\"created_at\":\""   << json_escape(row.str(9)) << "\""
+                    << "}";
+            }
+            out << "]";
+            res.set_content(envelope(out.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("UPSTREAM", std::string(e.what())),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── / (landing) ──
     svr.Get("/", [&cfg](const httplib::Request&, httplib::Response& res) {
         std::ostringstream d;
         d << "{\"service\":\"tagstackd\""
           << ",\"version\":\"" << kVersion << "\""
           << ",\"hostname\":\"" << cfg.hostname << "\""
-          << ",\"docs\":\"/api/v1/health\"}";
+          << ",\"endpoints\":["
+          << "\"/api/v1/health\","
+          << "\"/api/v1/version\","
+          << "\"/api/v1/stations\""
+          << "]}";
         res.set_content(envelope(d.str()), "application/json; charset=utf-8");
     });
 
-    // ── 404 — match the JSON envelope so clients don't see HTML ──
+    // ── 404 ──
     svr.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
-        std::ostringstream out;
-        out << "{\"data\":null"
-            << ",\"meta\":{\"server_time\":\"" << iso8601_now() << "\""
-            << ",\"path\":\""   << req.path   << "\""
-            << ",\"method\":\"" << req.method << "\"}"
-            << ",\"errors\":[{\"code\":\"NOT_FOUND\",\"message\":\"no route matches\"}]}";
-        res.set_content(out.str(), "application/json; charset=utf-8");
+        std::ostringstream meta_extra;
+        meta_extra << ",\"path\":\"" << req.path << "\""
+                   << ",\"method\":\"" << req.method << "\"";
+        res.set_content(envelope_error("NOT_FOUND", "no route matches", meta_extra.str()),
+                        "application/json; charset=utf-8");
     });
 
-    // Background thread watches for shutdown signal
+    // Shutdown watcher
     std::thread shutdown_watcher([&svr]() {
         while (!g_shutting_down.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
