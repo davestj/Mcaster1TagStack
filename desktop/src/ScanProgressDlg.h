@@ -8,6 +8,7 @@
 #pragma once
 #include <QDialog>
 #include <QStringList>
+class ApiClient;
 class QProgressBar;
 class QLabel;
 class QPushButton;
@@ -17,9 +18,22 @@ class ScanProgressDlg : public QDialog {
     Q_OBJECT
 public:
     explicit ScanProgressDlg(const QStringList& paths, QWidget* parent = nullptr);
+    void setApi(ApiClient* api) { m_api = api; }
+
+private slots:
+    void onTick();
+    void onCancel();
 
 private:
-    QStringList   m_paths;
+    void processOne(const QString& path);
+
+    ApiClient*    m_api      = nullptr;
+    QStringList   m_paths;       // initially-supplied files OR folders
+    QStringList   m_expanded;    // post-expansion file list
+    int           m_cursor    = 0;
+    int           m_okCount   = 0;
+    int           m_skipCount = 0;
+    bool          m_cancelled = false;
     QProgressBar* m_progress = nullptr;
     QLabel*       m_current = nullptr;
     QLabel*       m_summary = nullptr;

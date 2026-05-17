@@ -140,15 +140,15 @@ void MainWindow::buildContentStack() {
     connect(m_pageDirectory, &DirectoryPage::stationActivated,
             this, &MainWindow::loadStream);
     m_pageServers       = new ServersPage(m_api);
-    m_pageMedia         = new MediaLibraryPage();
+    m_pageMedia         = new MediaLibraryPage(m_api);
     m_pageIcy22         = new Icy22Page(m_api);
     m_pageLive          = new LiveStreamPage();
     m_pagePodcasts      = new PodcastsPage();
     m_pageSettings      = new SettingsPage();
     m_pageLogging       = new LoggingPage();
     m_pageSocialcasting = new SocialcastingPage();
-    m_pageDataQueue     = new DataQueuePage();
-    m_pageEvents        = new EventsPage();
+    m_pageDataQueue     = new DataQueuePage(m_api);
+    m_pageEvents        = new EventsPage(m_api);
     // Order MUST match kNavItems[].
     m_stack->addWidget(m_pageDirectory);
     m_stack->addWidget(m_pageServers);

@@ -2,18 +2,24 @@
 // 3 tabs: Library, Playlist, Export.
 
 #pragma once
+#include <QJsonArray>
 #include <QWidget>
+class ApiClient;
 class QTabWidget;
 class QTableWidget;
 class QListWidget;
 class QLineEdit;
 class QPushButton;
 class QComboBox;
+class QLabel;
 
 class MediaLibraryPage : public QWidget {
     Q_OBJECT
 public:
-    explicit MediaLibraryPage(QWidget* parent = nullptr);
+    explicit MediaLibraryPage(ApiClient* api = nullptr, QWidget* parent = nullptr);
+
+public slots:
+    void refresh();
 
 private slots:
     void onAddFiles();
@@ -21,13 +27,20 @@ private slots:
     void onEditMetadata();
     void onOpenComposerPro();
     void onExport();
+    void onRemoveSelected();
+    void onSearchChanged();
+    void onMyMediaReceived(const QJsonArray& items);
+    void onMyMediaUpserted(qint64 mediaId, const QString& filePath);
+    void onMyMediaDeleted(qint64 mediaId, int deleted);
 
 private:
     QWidget* buildLibraryTab();
     QWidget* buildPlaylistTab();
     QWidget* buildExportTab();
 
+    ApiClient*    m_api        = nullptr;
     QTabWidget*   m_tabs       = nullptr;
+    QJsonArray    m_libraryRaw;
 
     // Library tab
     QTableWidget* m_libTable   = nullptr;
@@ -36,6 +49,7 @@ private:
     QPushButton*  m_libAddFolder = nullptr;
     QPushButton*  m_libRemove  = nullptr;
     QPushButton*  m_libClear   = nullptr;
+    QLabel*       m_libStatus  = nullptr;
 
     // Playlist tab
     QListWidget*  m_plList     = nullptr;

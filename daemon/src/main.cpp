@@ -1607,6 +1607,558 @@ int main(int argc, char** argv) {
         }
     });
 
+    // ── GET /api/v1/me/media ──
+    // Lists media files owned by the bearer. q= for title/artist/album substring
+    // filter, limit/offset for pagination.
+    svr.Get("/api/v1/me/media", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            int limit  = std::max(1, std::min(500,
+                req.has_param("limit")  ? std::atoi(req.get_param_value("limit").c_str())  : 100));
+            int offset = std::max(0,
+                req.has_param("offset") ? std::atoi(req.get_param_value("offset").c_str()) : 0);
+            std::string q = req.has_param("q") ? req.get_param_value("q") : "";
+            std::ostringstream sql;
+            sql << "SELECT id, COALESCE(file_path,''), COALESCE(title,''), COALESCE(artist,''), "
+                << "       COALESCE(album,''), COALESCE(genre,''), COALESCE(format,''), "
+                << "       year, duration_sec, file_size, "
+                << "       UNIX_TIMESTAMP(added_at) "
+                << "FROM media_items WHERE user_id = " << rt.user_id;
+            if (!q.empty()) {
+                auto eq = tdb.escape(q);
+                sql << " AND (title LIKE '%" << eq << "%' OR artist LIKE '%" << eq << "%' "
+                    << "     OR album LIKE '%" << eq << "%')";
+            }
+            sql << " ORDER BY added_at DESC LIMIT " << limit << " OFFSET " << offset;
+            auto r = tdb.query(sql.str());
+            std::ostringstream out; out << "[";
+            bool first = true;
+            mcaster1::tagstack::db::Row row(nullptr, nullptr, 0);
+            while (r.next(row)) {
+                if (!first) out << ",";
+                first = false;
+                out << "{\"id\":"          << row.i64(0)
+                    << ",\"file_path\":\"" << json_escape(row.str(1)) << "\""
+                    << ",\"title\":\""     << json_escape(row.str(2)) << "\""
+                    << ",\"artist\":\""    << json_escape(row.str(3)) << "\""
+                    << ",\"album\":\""     << json_escape(row.str(4)) << "\""
+                    << ",\"genre\":\""     << json_escape(row.str(5)) << "\""
+                    << ",\"format\":\""    << json_escape(row.str(6)) << "\""
+                    << ",\"year\":"        << row.i64(7)
+                    << ",\"duration_sec\":"<< row.i64(8)
+                    << ",\"file_size\":"   << row.i64(9)
+                    << ",\"added_at\":"    << row.i64(10)
+                    << "}";
+            }
+            out << "]";
+            res.set_content(envelope(out.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── POST /api/v1/me/media ──
+    // Registers a media item (metadata only — no file upload here). The caller
+    // (the desktop's TagLib scanner) supplies the local file_path which must be
+    // unique. On duplicate file_path, returns the existing row id instead of 409
+    // (idempotent rescans).
+    svr.Post("/api/v1/me/media", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        auto extract = [&](const std::string& key) -> std::string {
+            const auto& body = req.body;
+            std::string needle = "\"" + key + "\"";
+            auto p = body.find(needle);
+            if (p == std::string::npos) return "";
+            p = body.find(':', p);
+            if (p == std::string::npos) return "";
+            p = body.find('"', p);
+            if (p == std::string::npos) return "";
+            ++p;
+            std::string out;
+            while (p < body.size() && body[p] != '"') {
+                if (body[p] == '\\' && p + 1 < body.size()) { out += body[p+1]; p += 2; }
+                else out += body[p++];
+            }
+            return out;
+        };
+        auto extract_int = [&](const std::string& key) -> int64_t {
+            const auto& body = req.body;
+            std::string needle = "\"" + key + "\"";
+            auto p = body.find(needle);
+            if (p == std::string::npos) return 0;
+            p = body.find(':', p);
+            if (p == std::string::npos) return 0;
+            ++p;
+            while (p < body.size() && (body[p] == ' ' || body[p] == '\t')) ++p;
+            std::string num;
+            while (p < body.size() && (std::isdigit(static_cast<unsigned char>(body[p])) || body[p] == '-')) {
+                num += body[p++];
+            }
+            return num.empty() ? 0 : std::stoll(num);
+        };
+        std::string file_path = extract("file_path");
+        if (file_path.empty()) {
+            res.status = 400;
+            res.set_content(envelope_error("VALIDATION", "'file_path' is required"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+        std::string title  = extract("title");
+        std::string artist = extract("artist");
+        std::string album  = extract("album");
+        std::string genre  = extract("genre");
+        std::string format = extract("format");
+        int64_t year         = extract_int("year");
+        int64_t duration_sec = extract_int("duration_sec");
+        int64_t file_size    = extract_int("file_size");
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            auto q = [&](const std::string& s) {
+                return s.empty() ? std::string("NULL") : ("'" + tdb.escape(s) + "'");
+            };
+            std::ostringstream sql;
+            sql << "INSERT INTO media_items "
+                << "(user_id, file_path, title, artist, album, genre, format, year, duration_sec, file_size) "
+                << "VALUES (" << rt.user_id << ","
+                << "'" << tdb.escape(file_path) << "',"
+                << q(title)  << "," << q(artist) << "," << q(album) << ","
+                << q(genre)  << "," << q(format) << ","
+                << year      << "," << duration_sec << "," << file_size << ")"
+                << " ON DUPLICATE KEY UPDATE "
+                << "  title=VALUES(title), artist=VALUES(artist), album=VALUES(album), "
+                << "  genre=VALUES(genre), format=VALUES(format), year=VALUES(year), "
+                << "  duration_sec=VALUES(duration_sec), file_size=VALUES(file_size), "
+                << "  user_id=VALUES(user_id)";
+            tdb.exec(sql.str());
+            // SELECT the id back (LAST_INSERT_ID is 0 on the update path).
+            auto sel = tdb.query(
+                "SELECT id FROM media_items WHERE file_path = '" + tdb.escape(file_path) + "'");
+            mcaster1::tagstack::db::Row row(nullptr, nullptr, 0);
+            int64_t id = sel.next(row) ? row.i64(0) : 0;
+            std::ostringstream d;
+            d << "{\"id\":" << id << ",\"file_path\":\""
+              << json_escape(file_path) << "\",\"upserted\":true}";
+            res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── DELETE /api/v1/me/media/:id ──
+    svr.Delete("/api/v1/me/media/:id", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            std::string id = req.path_params.at("id");
+            // Accept numeric id only — protect against SQL injection.
+            for (char c : id) if (!std::isdigit(static_cast<unsigned char>(c))) {
+                res.status = 400;
+                res.set_content(envelope_error("VALIDATION", "id must be a positive integer"),
+                                "application/json; charset=utf-8");
+                return;
+            }
+            std::ostringstream sql;
+            sql << "DELETE FROM media_items WHERE id = " << id
+                << " AND user_id = " << rt.user_id;
+            auto n = tdb.exec(sql.str());
+            if (n == 0) {
+                res.status = 404;
+                res.set_content(envelope_error("NOT_FOUND", "no media item with that id owned by you"),
+                                "application/json; charset=utf-8");
+                return;
+            }
+            std::ostringstream d;
+            d << "{\"id\":" << id << ",\"deleted\":" << n << "}";
+            res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── GET /api/v1/me/events ──
+    svr.Get("/api/v1/me/events", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            std::ostringstream sql;
+            sql << "SELECT id, COALESCE(station_id,''), name, enabled, trigger_mode, "
+                << "       COALESCE(daypart_start,''), COALESCE(daypart_end,''), "
+                << "       days_of_week, send_interval_s, dedup_window_m, "
+                << "       UNIX_TIMESTAMP(next_run_at), UNIX_TIMESTAMP(last_run_at), "
+                << "       run_count "
+                << "FROM broadcast_events WHERE user_id = " << rt.user_id
+                << " ORDER BY name";
+            auto r = tdb.query(sql.str());
+            std::ostringstream out; out << "[";
+            bool first = true;
+            mcaster1::tagstack::db::Row row(nullptr, nullptr, 0);
+            while (r.next(row)) {
+                if (!first) out << ",";
+                first = false;
+                out << "{\"id\":"               << row.i64(0)
+                    << ",\"station_id\":\""    << json_escape(row.str(1)) << "\""
+                    << ",\"name\":\""          << json_escape(row.str(2)) << "\""
+                    << ",\"enabled\":"         << (row.boolean(3) ? "true" : "false")
+                    << ",\"trigger_mode\":\""  << json_escape(row.str(4)) << "\""
+                    << ",\"daypart_start\":\"" << json_escape(row.str(5)) << "\""
+                    << ",\"daypart_end\":\""   << json_escape(row.str(6)) << "\""
+                    << ",\"days_of_week\":\""  << json_escape(row.str(7)) << "\""
+                    << ",\"send_interval_s\":" << row.i64(8)
+                    << ",\"dedup_window_m\":"  << row.i64(9)
+                    << ",\"next_run_at\":"     << row.i64(10)
+                    << ",\"last_run_at\":"     << row.i64(11)
+                    << ",\"run_count\":"       << row.i64(12)
+                    << "}";
+            }
+            out << "]";
+            res.set_content(envelope(out.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── POST /api/v1/me/events ──
+    svr.Post("/api/v1/me/events", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        auto extract = [&](const std::string& key) -> std::string {
+            const auto& body = req.body;
+            std::string needle = "\"" + key + "\"";
+            auto p = body.find(needle);
+            if (p == std::string::npos) return "";
+            p = body.find(':', p);
+            if (p == std::string::npos) return "";
+            p = body.find('"', p);
+            if (p == std::string::npos) return "";
+            ++p;
+            std::string out;
+            while (p < body.size() && body[p] != '"') {
+                if (body[p] == '\\' && p + 1 < body.size()) { out += body[p+1]; p += 2; }
+                else out += body[p++];
+            }
+            return out;
+        };
+        auto extract_int = [&](const std::string& key, int dflt = 0) -> int {
+            const auto& body = req.body;
+            std::string needle = "\"" + key + "\"";
+            auto p = body.find(needle);
+            if (p == std::string::npos) return dflt;
+            p = body.find(':', p);
+            if (p == std::string::npos) return dflt;
+            ++p;
+            while (p < body.size() && (body[p] == ' ' || body[p] == '\t')) ++p;
+            std::string num;
+            while (p < body.size() && (std::isdigit(static_cast<unsigned char>(body[p])) || body[p] == '-')) {
+                num += body[p++];
+            }
+            return num.empty() ? dflt : std::stoi(num);
+        };
+        std::string name = extract("name");
+        if (name.empty()) {
+            res.status = 400;
+            res.set_content(envelope_error("VALIDATION", "'name' is required"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+        std::string station_id    = extract("station_id");
+        std::string trigger_mode  = extract("trigger_mode");  if (trigger_mode.empty()) trigger_mode = "manual";
+        std::string daypart_start = extract("daypart_start");
+        std::string daypart_end   = extract("daypart_end");
+        std::string days_of_week  = extract("days_of_week");  if (days_of_week.empty()) days_of_week = "1234567";
+        int  enabled       = extract_int("enabled", 1);
+        int  send_int      = extract_int("send_interval_s", 300);
+        int  dedup_window  = extract_int("dedup_window_m", 30);
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            auto q = [&](const std::string& s) {
+                return s.empty() ? std::string("NULL") : ("'" + tdb.escape(s) + "'");
+            };
+            std::ostringstream sql;
+            sql << "INSERT INTO broadcast_events "
+                << "(user_id, station_id, session_id, name, enabled, trigger_mode, "
+                << " daypart_start, daypart_end, days_of_week, send_interval_s, dedup_window_m) "
+                << "VALUES (" << rt.user_id << ","
+                << q(station_id) << ","
+                << "0,"  // session_id legacy field; unused in 3c flow
+                << "'" << tdb.escape(name) << "',"
+                << (enabled ? 1 : 0) << ","
+                << "'" << tdb.escape(trigger_mode) << "',"
+                << q(daypart_start) << "," << q(daypart_end) << ","
+                << "'" << tdb.escape(days_of_week) << "',"
+                << send_int << "," << dedup_window << ")";
+            tdb.exec(sql.str());
+            auto id = tdb.last_insert_id();
+            std::ostringstream d;
+            d << "{\"id\":" << id << ",\"name\":\"" << json_escape(name) << "\",\"created\":true}";
+            res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── PUT /api/v1/me/events/:id (toggle/update) ──
+    svr.Put("/api/v1/me/events/:id", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        std::string id = req.path_params.at("id");
+        for (char c : id) if (!std::isdigit(static_cast<unsigned char>(c))) {
+            res.status = 400;
+            res.set_content(envelope_error("VALIDATION", "id must be numeric"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+        auto extract = [&](const std::string& key) -> std::pair<bool, std::string> {
+            const auto& body = req.body;
+            std::string needle = "\"" + key + "\"";
+            auto p = body.find(needle);
+            if (p == std::string::npos) return {false, ""};
+            p = body.find(':', p);
+            if (p == std::string::npos) return {false, ""};
+            p = body.find('"', p);
+            if (p == std::string::npos) return {false, ""};
+            ++p;
+            std::string out;
+            while (p < body.size() && body[p] != '"') {
+                if (body[p] == '\\' && p + 1 < body.size()) { out += body[p+1]; p += 2; }
+                else out += body[p++];
+            }
+            return {true, out};
+        };
+        auto extract_int = [&](const std::string& key) -> std::pair<bool, int> {
+            const auto& body = req.body;
+            std::string needle = "\"" + key + "\"";
+            auto p = body.find(needle);
+            if (p == std::string::npos) return {false, 0};
+            p = body.find(':', p);
+            if (p == std::string::npos) return {false, 0};
+            ++p;
+            while (p < body.size() && (body[p] == ' ' || body[p] == '\t')) ++p;
+            std::string num;
+            while (p < body.size() && (std::isdigit(static_cast<unsigned char>(body[p])) || body[p] == '-')) {
+                num += body[p++];
+            }
+            if (num.empty()) return {false, 0};
+            return {true, std::stoi(num)};
+        };
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            std::ostringstream sets;
+            bool any = false;
+            auto setIfStr = [&](const std::string& key, const std::string& col) {
+                auto [p, v] = extract(key);
+                if (!p) return;
+                if (any) sets << ", ";
+                sets << col << "='" << tdb.escape(v) << "'";
+                any = true;
+            };
+            auto setIfInt = [&](const std::string& key, const std::string& col) {
+                auto [p, v] = extract_int(key);
+                if (!p) return;
+                if (any) sets << ", ";
+                sets << col << "=" << v;
+                any = true;
+            };
+            setIfStr("name",          "name");
+            setIfStr("station_id",    "station_id");
+            setIfStr("trigger_mode",  "trigger_mode");
+            setIfStr("daypart_start", "daypart_start");
+            setIfStr("daypart_end",   "daypart_end");
+            setIfStr("days_of_week",  "days_of_week");
+            setIfInt("enabled",         "enabled");
+            setIfInt("send_interval_s", "send_interval_s");
+            setIfInt("dedup_window_m",  "dedup_window_m");
+            if (!any) {
+                res.status = 400;
+                res.set_content(envelope_error("VALIDATION", "no editable fields supplied"),
+                                "application/json; charset=utf-8");
+                return;
+            }
+            std::ostringstream sql;
+            sql << "UPDATE broadcast_events SET " << sets.str()
+                << " WHERE id = " << id << " AND user_id = " << rt.user_id;
+            auto n = tdb.exec(sql.str());
+            if (n == 0) {
+                res.status = 404;
+                res.set_content(envelope_error("NOT_FOUND", "no event with that id owned by you"),
+                                "application/json; charset=utf-8");
+                return;
+            }
+            std::ostringstream d;
+            d << "{\"id\":" << id << ",\"updated\":" << n << "}";
+            res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── DELETE /api/v1/me/events/:id ──
+    svr.Delete("/api/v1/me/events/:id", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        std::string id = req.path_params.at("id");
+        for (char c : id) if (!std::isdigit(static_cast<unsigned char>(c))) {
+            res.status = 400;
+            res.set_content(envelope_error("VALIDATION", "id must be numeric"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            std::ostringstream sql;
+            sql << "DELETE FROM broadcast_events WHERE id = " << id
+                << " AND user_id = " << rt.user_id;
+            auto n = tdb.exec(sql.str());
+            if (n == 0) {
+                res.status = 404;
+                res.set_content(envelope_error("NOT_FOUND", "no event with that id owned by you"),
+                                "application/json; charset=utf-8");
+                return;
+            }
+            std::ostringstream d;
+            d << "{\"id\":" << id << ",\"deleted\":" << n << "}";
+            res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── GET /api/v1/me/events/:id/runs ──
+    svr.Get("/api/v1/me/events/:id/runs", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        std::string id = req.path_params.at("id");
+        for (char c : id) if (!std::isdigit(static_cast<unsigned char>(c))) {
+            res.status = 400;
+            res.set_content(envelope_error("VALIDATION", "id must be numeric"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            // Confirm ownership first so users can't enumerate others' runs.
+            auto own = tdb.query(
+                "SELECT 1 FROM broadcast_events WHERE id = " + id +
+                " AND user_id = " + std::to_string(rt.user_id) + " LIMIT 1");
+            mcaster1::tagstack::db::Row r0(nullptr, nullptr, 0);
+            if (!own.next(r0)) {
+                res.status = 404;
+                res.set_content(envelope_error("NOT_FOUND", "no event with that id owned by you"),
+                                "application/json; charset=utf-8");
+                return;
+            }
+            std::ostringstream sql;
+            sql << "SELECT id, status, COALESCE(result_msg,''), UNIX_TIMESTAMP(ran_at) "
+                << "FROM event_run_log WHERE event_id = " << id
+                << " ORDER BY ran_at DESC LIMIT 100";
+            auto r = tdb.query(sql.str());
+            std::ostringstream out; out << "[";
+            bool first = true;
+            mcaster1::tagstack::db::Row row(nullptr, nullptr, 0);
+            while (r.next(row)) {
+                if (!first) out << ",";
+                first = false;
+                out << "{\"id\":"           << row.i64(0)
+                    << ",\"status\":\""    << json_escape(row.str(1)) << "\""
+                    << ",\"result_msg\":\""<< json_escape(row.str(2)) << "\""
+                    << ",\"ran_at\":"      << row.i64(3) << "}";
+            }
+            out << "]";
+            res.set_content(envelope(out.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── GET /api/v1/me/stations/:id/spin-history ──
+    svr.Get("/api/v1/me/stations/:id/spin-history", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            std::string sid = req.path_params.at("id");
+            auto esid = tdb.escape(sid);
+            // Ownership check — NULL owner stations (demo) are visible too.
+            auto own = tdb.query(
+                "SELECT user_id FROM stations WHERE id = '" + esid + "' LIMIT 1");
+            mcaster1::tagstack::db::Row r0(nullptr, nullptr, 0);
+            if (!own.next(r0)) {
+                res.status = 404;
+                res.set_content(envelope_error("NOT_FOUND", "no station '" + sid + "'"),
+                                "application/json; charset=utf-8");
+                return;
+            }
+            if (!r0.str(0).empty() && std::stoi(r0.str(0)) != static_cast<int>(rt.user_id)) {
+                res.status = 403;
+                res.set_content(envelope_error("FORBIDDEN", "station belongs to another user"),
+                                "application/json; charset=utf-8");
+                return;
+            }
+            int limit = std::max(1, std::min(500,
+                req.has_param("limit") ? std::atoi(req.get_param_value("limit").c_str()) : 100));
+            std::ostringstream sql;
+            sql << "SELECT id, COALESCE(title,''), COALESCE(artist,''), COALESCE(album,''), "
+                << "       COALESCE(genre,''), duration_sec, "
+                << "       UNIX_TIMESTAMP(spin_started), UNIX_TIMESTAMP(received_at), "
+                << "       spin_id "
+                << "FROM spin_history WHERE station_id = '" << esid << "' "
+                << "ORDER BY received_at DESC LIMIT " << limit;
+            auto r = tdb.query(sql.str());
+            std::ostringstream out; out << "[";
+            bool first = true;
+            mcaster1::tagstack::db::Row row(nullptr, nullptr, 0);
+            while (r.next(row)) {
+                if (!first) out << ",";
+                first = false;
+                out << "{\"id\":"             << row.i64(0)
+                    << ",\"title\":\""        << json_escape(row.str(1)) << "\""
+                    << ",\"artist\":\""       << json_escape(row.str(2)) << "\""
+                    << ",\"album\":\""        << json_escape(row.str(3)) << "\""
+                    << ",\"genre\":\""        << json_escape(row.str(4)) << "\""
+                    << ",\"duration_sec\":"   << row.i64(5)
+                    << ",\"spin_started\":"   << row.i64(6)
+                    << ",\"received_at\":"    << row.i64(7)
+                    << ",\"spin_id\":\""      << json_escape(row.str(8)) << "\""
+                    << "}";
+            }
+            out << "]";
+            res.set_content(envelope(out.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
     // ── POST /api/v1/admin/yp/refresh ──
     // Admin-only: kicks an immediate YP ingest. Admin = cc_user_link.account_type='admin'
     // OR cc_usergroupid IN (6=Administrators, 5=Super Moderators).
@@ -1664,6 +2216,15 @@ int main(int argc, char** argv) {
           << "\"POST /api/v1/me/stations\","
           << "\"PUT /api/v1/me/stations/{id}\","
           << "\"DELETE /api/v1/me/stations/{id}\","
+          << "\"GET /api/v1/me/stations/{id}/spin-history\","
+          << "\"GET /api/v1/me/media\","
+          << "\"POST /api/v1/me/media\","
+          << "\"DELETE /api/v1/me/media/{id}\","
+          << "\"GET /api/v1/me/events\","
+          << "\"POST /api/v1/me/events\","
+          << "\"PUT /api/v1/me/events/{id}\","
+          << "\"DELETE /api/v1/me/events/{id}\","
+          << "\"GET /api/v1/me/events/{id}/runs\","
           << "\"POST /api/v1/admin/yp/refresh\","
           << "\"GET /api/v1/now-playing/{station}\","
           << "\"PUT /api/v1/now-playing/{station}\","

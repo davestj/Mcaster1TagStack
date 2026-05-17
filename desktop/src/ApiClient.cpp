@@ -273,6 +273,95 @@ void ApiClient::putNowPlaying(const QString& stationId, const QJsonObject& spin)
     });
 }
 
+void ApiClient::listSpinHistory(const QString& stationId, int limit) {
+    auto* r = doGet("/api/v1/me/stations/" + stationId
+                    + "/spin-history?limit=" + QString::number(limit),
+                    "station.spinHistory");
+    handleReply(r, "station.spinHistory", [this, stationId](const QJsonObject& env) {
+        emit spinHistoryReceived(stationId, env.value("data").toArray());
+    });
+}
+
+// ─── Media ────────────────────────────────────────────────────────────────
+
+void ApiClient::listMyMedia(const QString& q, int limit, int offset) {
+    QUrlQuery qs;
+    if (!q.isEmpty()) qs.addQueryItem("q", q);
+    qs.addQueryItem("limit",  QString::number(limit));
+    qs.addQueryItem("offset", QString::number(offset));
+    auto* r = doGet("/api/v1/me/media?" + qs.toString(QUrl::FullyEncoded), "media.list");
+    handleReply(r, "media.list", [this](const QJsonObject& env) {
+        emit myMediaReceived(env.value("data").toArray());
+    });
+}
+
+void ApiClient::upsertMyMedia(const QJsonObject& payload) {
+    auto* r = doPost("/api/v1/me/media",
+                     QJsonDocument(payload).toJson(QJsonDocument::Compact),
+                     "media.upsert");
+    handleReply(r, "media.upsert", [this](const QJsonObject& env) {
+        auto d = env.value("data").toObject();
+        emit myMediaUpserted(d.value("id").toVariant().toLongLong(),
+                             d.value("file_path").toString());
+    });
+}
+
+void ApiClient::deleteMyMedia(qint64 mediaId) {
+    auto* r = doDelete("/api/v1/me/media/" + QString::number(mediaId), "media.delete");
+    handleReply(r, "media.delete", [this, mediaId](const QJsonObject& env) {
+        emit myMediaDeleted(mediaId,
+            env.value("data").toObject().value("deleted").toInt());
+    });
+}
+
+// ─── Events ───────────────────────────────────────────────────────────────
+
+void ApiClient::listMyEvents() {
+    auto* r = doGet("/api/v1/me/events", "events.list");
+    handleReply(r, "events.list", [this](const QJsonObject& env) {
+        emit myEventsReceived(env.value("data").toArray());
+    });
+}
+
+void ApiClient::createMyEvent(const QJsonObject& payload) {
+    auto* r = doPost("/api/v1/me/events",
+                     QJsonDocument(payload).toJson(QJsonDocument::Compact),
+                     "events.create");
+    handleReply(r, "events.create", [this](const QJsonObject& env) {
+        auto d = env.value("data").toObject();
+        emit myEventCreated(d.value("id").toVariant().toLongLong(),
+                            d.value("name").toString());
+    });
+}
+
+void ApiClient::updateMyEvent(qint64 eventId, const QJsonObject& payload) {
+    QNetworkRequest req((QUrl(m_baseUrl + "/api/v1/me/events/" + QString::number(eventId))));
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    if (!m_token.isEmpty())
+        req.setRawHeader("Authorization", ("Bearer " + m_token).toUtf8());
+    auto body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
+    auto* reply = m_nam->sendCustomRequest(req, "PUT", body);
+    handleReply(reply, "events.update", [this, eventId](const QJsonObject& env) {
+        emit myEventUpdated(eventId,
+            env.value("data").toObject().value("updated").toInt());
+    });
+}
+
+void ApiClient::deleteMyEvent(qint64 eventId) {
+    auto* r = doDelete("/api/v1/me/events/" + QString::number(eventId), "events.delete");
+    handleReply(r, "events.delete", [this, eventId](const QJsonObject& env) {
+        emit myEventDeleted(eventId,
+            env.value("data").toObject().value("deleted").toInt());
+    });
+}
+
+void ApiClient::listMyEventRuns(qint64 eventId) {
+    auto* r = doGet("/api/v1/me/events/" + QString::number(eventId) + "/runs", "events.runs");
+    handleReply(r, "events.runs", [this, eventId](const QJsonObject& env) {
+        emit myEventRunsReceived(eventId, env.value("data").toArray());
+    });
+}
+
 // ─── Social ───────────────────────────────────────────────────────────────
 
 void ApiClient::listMySocial() {

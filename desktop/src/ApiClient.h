@@ -64,6 +64,19 @@ public:
     void updateMyStation(const QString& stationId, const QJsonObject& payload);
     void deleteMyStation(const QString& stationId);
     void putNowPlaying(const QString& stationId, const QJsonObject& spin);
+    void listSpinHistory(const QString& stationId, int limit = 100);
+
+    // ── My media library ──────────────────────────────────────────────────
+    void listMyMedia(const QString& q = {}, int limit = 200, int offset = 0);
+    void upsertMyMedia(const QJsonObject& payload);
+    void deleteMyMedia(qint64 mediaId);
+
+    // ── My broadcast events ───────────────────────────────────────────────
+    void listMyEvents();
+    void createMyEvent(const QJsonObject& payload);
+    void updateMyEvent(qint64 eventId, const QJsonObject& payload);
+    void deleteMyEvent(qint64 eventId);
+    void listMyEventRuns(qint64 eventId);
 
     // ── Social ────────────────────────────────────────────────────────────
     void listMySocial();
@@ -101,6 +114,17 @@ signals:
     void myStationUpdated(const QString& stationId, int updated);
     void myStationDeleted(const QString& stationId, int deleted);
     void nowPlayingAccepted(const QString& stationId, const QString& spinId);
+    void spinHistoryReceived(const QString& stationId, const QJsonArray& spins);
+
+    // My media + events
+    void myMediaReceived(const QJsonArray& items);
+    void myMediaUpserted(qint64 mediaId, const QString& filePath);
+    void myMediaDeleted(qint64 mediaId, int deleted);
+    void myEventsReceived(const QJsonArray& events);
+    void myEventCreated(qint64 eventId, const QString& name);
+    void myEventUpdated(qint64 eventId, int updated);
+    void myEventDeleted(qint64 eventId, int deleted);
+    void myEventRunsReceived(qint64 eventId, const QJsonArray& runs);
 
     // Social
     void socialListReceived(const QJsonArray& accounts);
