@@ -448,14 +448,24 @@ int main(int argc, char** argv) {
         }
     });
 
+    // ── Diagnostic: literal POST route to confirm POST routing works ──
+    svr.Post("/api/v1/ai/echo", [](const httplib::Request& req, httplib::Response& res) {
+        std::ostringstream d;
+        d << "{\"echo\":\"" << json_escape(req.body) << "\"}";
+        res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+    });
+
     // ── POST /api/v1/ai/persona/{persona} ──
     // Proxies a generation request to local Ollama and returns the response
     // wrapped in the standard envelope. Body: { "prompt": "..." } and optional
     // "model" override. By default the model used is whatever Ollama has
     // configured for that persona.
-    svr.Post(R"(/api/v1/ai/persona/([A-Za-z0-9_.-]+))",
+    //
+    // cpp-httplib regex routes use ECMAScript syntax. We URL-decode the path
+    // parameter ourselves since httplib's req.matches[] gives the raw match.
+    svr.Post("/api/v1/ai/persona/:persona",
              [&cfg](const httplib::Request& req, httplib::Response& res) {
-        std::string persona = req.matches[1];
+        std::string persona = req.path_params.at("persona");
         const std::string& body = req.body;
 
         // Parse prompt + optional model from the request body
