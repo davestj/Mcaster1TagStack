@@ -32,8 +32,9 @@ namespace :daemon do
   desc "Build the daemon binary on the release"
   task :build do
     on roles(:app) do
-      within release_path do
-        execute :bash, "-c", "cd daemon && cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release && cmake --build build"
+      within "#{release_path}/daemon" do
+        execute :cmake, "-S", ".", "-B", "build", "-GNinja", "-DCMAKE_BUILD_TYPE=Release"
+        execute :cmake, "--build", "build", "-j", "$(nproc)"
       end
     end
   end
