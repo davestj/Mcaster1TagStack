@@ -66,3 +66,7 @@ __REFERENCE_ONLY__.md
 *.vcxproj.filters
 *.sln
 *.rc
+
+# ── Ruby / Bundler — Capistrano deploy tooling ─────────────────────────────
+vendor/bundle/
+.bundle/

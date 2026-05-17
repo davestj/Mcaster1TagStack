@@ -6,7 +6,7 @@ set :keep_releases, 5
 
 # Project identity
 set :application, "tagstack"
-set :repo_url,    "git@github.com:davestj/Mcaster1TagStack.git"
+set :repo_url,    "https://github.com/davestj/Mcaster1TagStack.git"
 set :branch,      "master"
 
 # Where the daemon lives on the server
