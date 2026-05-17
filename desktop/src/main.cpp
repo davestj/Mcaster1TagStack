@@ -15,6 +15,7 @@
 
 #include <QApplication>
 #include <QDialog>
+#include <QSettings>
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
@@ -23,6 +24,10 @@ int main(int argc, char** argv) {
     QApplication::setOrganizationDomain("mcaster1.com");
 
     ApiClient api;
+    // Honor any URL override the user saved on the Settings → Daemon tab.
+    QSettings s;
+    auto override_url = s.value("daemon/base_url").toString();
+    if (!override_url.isEmpty()) api.setBaseUrl(override_url);
 
     while (true) {
         if (!api.hasToken()) api.restoreToken();

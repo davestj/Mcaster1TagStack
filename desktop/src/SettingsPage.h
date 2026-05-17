@@ -1,36 +1,39 @@
-// SettingsPage.h — Qt mirror of CSettingsPage (NAV_SETTINGS, IDD 300).
-// 4 tabs: Servers, Application, Database, About.
+// SettingsPage.h — application settings backed by QSettings + a daemon
+// connection panel. v1 had a "Servers" tab in Settings (legacy ICY push
+// list) — in v2 that lives in "My Stations", so this page now has only
+// three tabs: Application, Daemon, About.
 
 #pragma once
 #include <QWidget>
+class ApiClient;
 class QTabWidget;
-class QTableWidget;
 class QLineEdit;
 class QCheckBox;
 class QComboBox;
 class QPushButton;
+class QLabel;
 
 class SettingsPage : public QWidget {
     Q_OBJECT
 public:
-    explicit SettingsPage(QWidget* parent = nullptr);
+    explicit SettingsPage(ApiClient* api = nullptr, QWidget* parent = nullptr);
+
+private slots:
+    void onSaveApplication();
+    void onPingDaemon();
+    void onSaveDaemonUrl();
 
 private:
-    QWidget* buildServersTab();
     QWidget* buildApplicationTab();
-    QWidget* buildDatabaseTab();
+    QWidget* buildDaemonTab();
     QWidget* buildAboutTab();
 
-    QTabWidget*   m_tabs = nullptr;
-    QTableWidget* m_servers = nullptr;
-    QCheckBox*    m_enableLog = nullptr;
-    QComboBox*    m_logLevel = nullptr;
-    QLineEdit*    m_logPath = nullptr;
-    QLineEdit*    m_dbHost = nullptr;
-    QLineEdit*    m_dbUser = nullptr;
-    QLineEdit*    m_dbPass = nullptr;
-    QPushButton*  m_dbTest = nullptr;
-    QPushButton*  m_dbInit = nullptr;
-    QPushButton*  m_dbBackup = nullptr;
-    QPushButton*  m_dbMigrate = nullptr;
+    ApiClient*   m_api = nullptr;
+    QTabWidget*  m_tabs = nullptr;
+    QCheckBox*   m_enableLog = nullptr;
+    QComboBox*   m_logLevel = nullptr;
+    QLineEdit*   m_logPath = nullptr;
+    QLineEdit*   m_daemonUrl = nullptr;
+    QPushButton* m_pingBtn = nullptr;
+    QLabel*      m_pingStatus = nullptr;
 };

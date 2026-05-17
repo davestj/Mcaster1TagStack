@@ -221,8 +221,17 @@ void MediaLibraryPage::onMyMediaDeleted(qint64 /*mediaId*/, int /*deleted*/) {
 }
 
 void MediaLibraryPage::onEditMetadata() {
+    auto rows = m_libTable->selectionModel()->selectedRows();
+    if (rows.isEmpty()) return;
+    int r = rows.first().row();
+    if (r < 0 || r >= m_libraryRaw.size()) return;
     MetadataEditorDlg dlg(this);
-    dlg.exec();
+    dlg.setApi(m_api);
+    dlg.load(m_libraryRaw.at(r).toObject());
+    if (dlg.exec() == QDialog::Accepted) {
+        // upsertMyMedia fires asynchronously; refresh after a tick.
+        QTimer::singleShot(200, this, &MediaLibraryPage::refresh);
+    }
 }
 
 void MediaLibraryPage::onOpenComposerPro() {
