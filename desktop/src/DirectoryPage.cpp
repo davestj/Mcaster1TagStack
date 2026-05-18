@@ -1,7 +1,10 @@
 #include "DirectoryPage.h"
 #include "ApiClient.h"
 
+#include <QApplication>
+#include <QClipboard>
 #include <QComboBox>
+#include <QDesktopServices>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
@@ -10,11 +13,13 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSplitter>
 #include <QTableWidget>
 #include <QTimer>
+#include <QUrl>
 #include <QVBoxLayout>
 
 DirectoryPage::DirectoryPage(ApiClient* api, QWidget* parent)
@@ -107,6 +112,11 @@ DirectoryPage::DirectoryPage(ApiClient* api, QWidget* parent)
     connect(m_search,        &QLineEdit::editingFinished,     this, &DirectoryPage::onSearchChanged);
     connect(m_stationTable,  &QTableWidget::itemSelectionChanged,
             this, &DirectoryPage::onStationSelected);
+    connect(m_stationTable,  &QTableWidget::itemDoubleClicked,
+            this, [this](QTableWidgetItem*) { onStationDoubleClicked(); });
+    m_stationTable->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_stationTable,  &QTableWidget::customContextMenuRequested,
+            this, &DirectoryPage::onContextMenuRequested);
     connect(m_btnAddTag,     &QPushButton::clicked,           this, &DirectoryPage::onAddTagClicked);
     connect(m_newTag,        &QLineEdit::returnPressed,       this, &DirectoryPage::onAddTagClicked);
     connect(m_btnPushSocial, &QPushButton::clicked,           this, &DirectoryPage::onPushToSocialClicked);
@@ -208,7 +218,10 @@ void DirectoryPage::onDirectoryListReceived(const QJsonArray& stations) {
     for (const auto& v : stations) {
         auto o = v.toObject();
         auto* name = new QTableWidgetItem(o.value("server_name").toString());
-        name->setData(Qt::UserRole, o.value("id").toString());
+        name->setData(Qt::UserRole,     o.value("id").toString());
+        // Cache listen_url on the row so context-menu actions don't have to
+        // re-fetch the station detail to know where to point the player.
+        name->setData(Qt::UserRole + 1, o.value("listen_url").toString());
         m_stationTable->setItem(r, 0, name);
         m_stationTable->setItem(r, 1, new QTableWidgetItem(o.value("genre").toString()));
         m_stationTable->setItem(r, 2, new QTableWidgetItem(o.value("country").toString()));
@@ -285,4 +298,90 @@ void DirectoryPage::onTagDeleted(const QString& stationId, const QString& /*tag*
     if (stationId != m_currentStationId) return;
     m_api->listMyTagsForStation(stationId);
     m_api->listStationTagCloud(stationId);
+}
+
+int DirectoryPage::selectedRow() const {
+    auto rows = m_stationTable->selectionModel()->selectedRows();
+    if (rows.isEmpty()) return -1;
+    return rows.first().row();
+}
+
+QString DirectoryPage::rowListenUrl(int row) const {
+    if (row < 0) return {};
+    auto* it = m_stationTable->item(row, 0);
+    return it ? it->data(Qt::UserRole + 1).toString() : QString();
+}
+
+QString DirectoryPage::rowStationName(int row) const {
+    if (row < 0) return {};
+    auto* it = m_stationTable->item(row, 0);
+    return it ? it->text() : QString();
+}
+
+void DirectoryPage::onStationDoubleClicked() {
+    int r = selectedRow();
+    if (r < 0) return;
+    QString url = rowListenUrl(r);
+    if (url.isEmpty()) return;
+    // Make sure the detail panel also reflects this station — fire the
+    // same loadStation we'd do on single-click, then ask MainWindow to play.
+    auto* it = m_stationTable->item(r, 0);
+    if (it) {
+        QString id = it->data(Qt::UserRole).toString();
+        if (!id.isEmpty() && id != m_currentStationId) loadStation(id);
+    }
+    emit stationPlayRequested(rowStationName(r), url);
+}
+
+void DirectoryPage::onContextMenuRequested(const QPoint& pos) {
+    auto* it = m_stationTable->itemAt(pos);
+    if (!it) return;
+    int r = it->row();
+    QString name = rowStationName(r);
+    QString url  = rowListenUrl(r);
+    QString id   = m_stationTable->item(r, 0)->data(Qt::UserRole).toString();
+
+    QMenu menu(this);
+    auto* aPlay     = menu.addAction("Play this station");
+    auto* aLoad     = menu.addAction("Load into player (don't play)");
+    menu.addSeparator();
+    auto* aTag      = menu.addAction("Tag this station…");
+    auto* aPush     = menu.addAction("Push my tags to social…");
+    menu.addSeparator();
+    auto* aCopyUrl  = menu.addAction("Copy listen URL");
+    auto* aCopyId   = menu.addAction("Copy station ID");
+    auto* aOpenWeb  = menu.addAction("Open listen URL in browser");
+    menu.addSeparator();
+    auto* aDetails  = menu.addAction("Show details (right pane)");
+
+    QAction* picked = menu.exec(m_stationTable->viewport()->mapToGlobal(pos));
+    if (!picked) return;
+
+    if (picked == aPlay) {
+        if (id != m_currentStationId) loadStation(id);
+        emit stationPlayRequested(name, url);
+    } else if (picked == aLoad) {
+        if (id != m_currentStationId) loadStation(id);
+        emit stationActivated(name, url);
+    } else if (picked == aTag) {
+        if (id != m_currentStationId) loadStation(id);
+        bool ok = false;
+        QString tag = QInputDialog::getText(this, "Tag station",
+            QString("Tag '%1' with:").arg(name), QLineEdit::Normal, "#", &ok);
+        if (ok && !tag.trimmed().isEmpty() && m_api) {
+            m_api->addTag(id, tag.trimmed(), m_newTagVisibility
+                ? m_newTagVisibility->currentText() : "public");
+        }
+    } else if (picked == aPush) {
+        m_currentStationId = id;
+        onPushToSocialClicked();
+    } else if (picked == aCopyUrl) {
+        QApplication::clipboard()->setText(url);
+    } else if (picked == aCopyId) {
+        QApplication::clipboard()->setText(id);
+    } else if (picked == aOpenWeb) {
+        if (!url.isEmpty()) QDesktopServices::openUrl(QUrl(url));
+    } else if (picked == aDetails) {
+        loadStation(id);
+    }
 }

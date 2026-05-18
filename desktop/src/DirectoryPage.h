@@ -28,6 +28,9 @@ public:
 signals:
     // Emitted when a station is selected — MainWindow's player strip listens.
     void stationActivated(const QString& name, const QString& listenUrl);
+    // Stronger signal: user explicitly asked to PLAY (double-click, context-
+    // menu Play). MainWindow loads the URL and hits play() immediately.
+    void stationPlayRequested(const QString& name, const QString& listenUrl);
 
 public slots:
     void refresh();  // re-runs the current filter against the API
@@ -35,6 +38,8 @@ public slots:
 private slots:
     void onSearchChanged();
     void onStationSelected();
+    void onStationDoubleClicked();
+    void onContextMenuRequested(const QPoint& pos);
     void onAddTagClicked();
     void onPushToSocialClicked();
     void onMyTagDoubleClicked(QListWidgetItem* it);
@@ -48,6 +53,9 @@ private slots:
 
 private:
     void loadStation(const QString& stationId);
+    QString rowListenUrl(int row) const;
+    QString rowStationName(int row) const;
+    int     selectedRow() const;
 
     ApiClient* m_api = nullptr;
     QString    m_currentStationId;

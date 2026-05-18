@@ -139,6 +139,11 @@ void MainWindow::buildContentStack() {
     m_pageDirectory     = new DirectoryPage(m_api);
     connect(m_pageDirectory, &DirectoryPage::stationActivated,
             this, &MainWindow::loadStream);
+    connect(m_pageDirectory, &DirectoryPage::stationPlayRequested,
+            this, [this](const QString& n, const QString& u) {
+        loadStream(n, u);
+        onPlayClicked();
+    });
     m_pageServers       = new ServersPage(m_api);
     m_pageMedia         = new MediaLibraryPage(m_api);
     m_pageIcy22         = new Icy22Page(m_api);
