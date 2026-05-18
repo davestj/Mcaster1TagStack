@@ -143,7 +143,7 @@ void MainWindow::buildContentStack() {
     m_pageMedia         = new MediaLibraryPage(m_api);
     m_pageIcy22         = new Icy22Page(m_api);
     m_pageLive          = new LiveStreamPage();
-    m_pagePodcasts      = new PodcastsPage();
+    m_pagePodcasts      = new PodcastsPage(m_api);
     m_pageSettings      = new SettingsPage(m_api);
     m_pageLogging       = new LoggingPage();
     m_pageSocialcasting = new SocialcastingPage();

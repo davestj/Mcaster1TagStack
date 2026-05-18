@@ -78,6 +78,14 @@ public:
     void deleteMyEvent(qint64 eventId);
     void listMyEventRuns(qint64 eventId);
 
+    // ── My podcasts ───────────────────────────────────────────────────────
+    void listMyPodcasts();
+    void createMyPodcast(const QJsonObject& payload);
+    void deleteMyPodcast(qint64 feedId);
+    void listMyPodcastEpisodes(qint64 feedId);
+    void createMyPodcastEpisode(qint64 feedId, const QJsonObject& payload);
+    void deleteMyPodcastEpisode(qint64 feedId, qint64 episodeId);
+
     // ── Social ────────────────────────────────────────────────────────────
     void listMySocial();
     void deleteSocial(const QString& platform);
@@ -125,6 +133,13 @@ signals:
     void myEventUpdated(qint64 eventId, int updated);
     void myEventDeleted(qint64 eventId, int deleted);
     void myEventRunsReceived(qint64 eventId, const QJsonArray& runs);
+
+    void myPodcastsReceived(const QJsonArray& podcasts);
+    void myPodcastCreated(qint64 feedId, const QString& slug);
+    void myPodcastDeleted(qint64 feedId, int deleted);
+    void myPodcastEpisodesReceived(qint64 feedId, const QJsonArray& episodes);
+    void myPodcastEpisodeCreated(qint64 feedId, qint64 episodeId, const QString& guid);
+    void myPodcastEpisodeDeleted(qint64 feedId, qint64 episodeId, int deleted);
 
     // Social
     void socialListReceived(const QJsonArray& accounts);

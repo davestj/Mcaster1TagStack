@@ -362,6 +362,64 @@ void ApiClient::listMyEventRuns(qint64 eventId) {
     });
 }
 
+// ─── Podcasts ─────────────────────────────────────────────────────────────
+
+void ApiClient::listMyPodcasts() {
+    auto* r = doGet("/api/v1/me/podcasts", "podcast.list");
+    handleReply(r, "podcast.list", [this](const QJsonObject& env) {
+        emit myPodcastsReceived(env.value("data").toArray());
+    });
+}
+
+void ApiClient::createMyPodcast(const QJsonObject& payload) {
+    auto* r = doPost("/api/v1/me/podcasts",
+                     QJsonDocument(payload).toJson(QJsonDocument::Compact),
+                     "podcast.create");
+    handleReply(r, "podcast.create", [this](const QJsonObject& env) {
+        auto d = env.value("data").toObject();
+        emit myPodcastCreated(d.value("id").toVariant().toLongLong(),
+                              d.value("slug").toString());
+    });
+}
+
+void ApiClient::deleteMyPodcast(qint64 feedId) {
+    auto* r = doDelete("/api/v1/me/podcasts/" + QString::number(feedId), "podcast.delete");
+    handleReply(r, "podcast.delete", [this, feedId](const QJsonObject& env) {
+        emit myPodcastDeleted(feedId,
+            env.value("data").toObject().value("deleted").toInt());
+    });
+}
+
+void ApiClient::listMyPodcastEpisodes(qint64 feedId) {
+    auto* r = doGet("/api/v1/me/podcasts/" + QString::number(feedId) + "/episodes",
+                    "podcast.episodes.list");
+    handleReply(r, "podcast.episodes.list", [this, feedId](const QJsonObject& env) {
+        emit myPodcastEpisodesReceived(feedId, env.value("data").toArray());
+    });
+}
+
+void ApiClient::createMyPodcastEpisode(qint64 feedId, const QJsonObject& payload) {
+    auto* r = doPost("/api/v1/me/podcasts/" + QString::number(feedId) + "/episodes",
+                     QJsonDocument(payload).toJson(QJsonDocument::Compact),
+                     "podcast.episodes.create");
+    handleReply(r, "podcast.episodes.create", [this, feedId](const QJsonObject& env) {
+        auto d = env.value("data").toObject();
+        emit myPodcastEpisodeCreated(feedId,
+            d.value("id").toVariant().toLongLong(),
+            d.value("guid").toString());
+    });
+}
+
+void ApiClient::deleteMyPodcastEpisode(qint64 feedId, qint64 episodeId) {
+    auto* r = doDelete("/api/v1/me/podcasts/" + QString::number(feedId)
+                       + "/episodes/" + QString::number(episodeId),
+                       "podcast.episodes.delete");
+    handleReply(r, "podcast.episodes.delete", [this, feedId, episodeId](const QJsonObject& env) {
+        emit myPodcastEpisodeDeleted(feedId, episodeId,
+            env.value("data").toObject().value("deleted").toInt());
+    });
+}
+
 // ─── Social ───────────────────────────────────────────────────────────────
 
 void ApiClient::listMySocial() {

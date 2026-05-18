@@ -2159,6 +2159,491 @@ int main(int argc, char** argv) {
         }
     });
 
+    // ── GET /api/v1/me/podcasts ──
+    svr.Get("/api/v1/me/podcasts", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            std::ostringstream sql;
+            sql << "SELECT id, slug, title, COALESCE(description,''), COALESCE(author,''), "
+                << "       COALESCE(email,''), COALESCE(cover_image_url,''), "
+                << "       COALESCE(website_url,''), language, COALESCE(category,''), "
+                << "       explicit_flag, COALESCE(copyright,''), "
+                << "       UNIX_TIMESTAMP(created_at), UNIX_TIMESTAMP(updated_at), "
+                << "       (SELECT COUNT(*) FROM podcast_episodes e WHERE e.feed_id = podcast_feeds.id) AS ep_count "
+                << "FROM podcast_feeds WHERE user_id = " << rt.user_id
+                << " ORDER BY title";
+            auto r = tdb.query(sql.str());
+            std::ostringstream out; out << "[";
+            bool first = true;
+            mcaster1::tagstack::db::Row row(nullptr, nullptr, 0);
+            while (r.next(row)) {
+                if (!first) out << ",";
+                first = false;
+                out << "{\"id\":"               << row.i64(0)
+                    << ",\"slug\":\""           << json_escape(row.str(1))  << "\""
+                    << ",\"title\":\""          << json_escape(row.str(2))  << "\""
+                    << ",\"description\":\""    << json_escape(row.str(3))  << "\""
+                    << ",\"author\":\""         << json_escape(row.str(4))  << "\""
+                    << ",\"email\":\""          << json_escape(row.str(5))  << "\""
+                    << ",\"cover_image_url\":\""<< json_escape(row.str(6))  << "\""
+                    << ",\"website_url\":\""    << json_escape(row.str(7))  << "\""
+                    << ",\"language\":\""       << json_escape(row.str(8))  << "\""
+                    << ",\"category\":\""       << json_escape(row.str(9))  << "\""
+                    << ",\"explicit_flag\":"    << (row.boolean(10) ? "true" : "false")
+                    << ",\"copyright\":\""      << json_escape(row.str(11)) << "\""
+                    << ",\"created_at\":"       << row.i64(12)
+                    << ",\"updated_at\":"       << row.i64(13)
+                    << ",\"episode_count\":"    << row.i64(14)
+                    << "}";
+            }
+            out << "]";
+            res.set_content(envelope(out.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── POST /api/v1/me/podcasts ──
+    svr.Post("/api/v1/me/podcasts", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        auto extract = [&](const std::string& key) -> std::string {
+            const auto& body = req.body;
+            std::string needle = "\"" + key + "\"";
+            auto p = body.find(needle);
+            if (p == std::string::npos) return "";
+            p = body.find(':', p);
+            if (p == std::string::npos) return "";
+            p = body.find('"', p);
+            if (p == std::string::npos) return "";
+            ++p;
+            std::string out;
+            while (p < body.size() && body[p] != '"') {
+                if (body[p] == '\\' && p + 1 < body.size()) { out += body[p+1]; p += 2; }
+                else out += body[p++];
+            }
+            return out;
+        };
+        std::string title = extract("title");
+        if (title.empty()) {
+            res.status = 400;
+            res.set_content(envelope_error("VALIDATION", "'title' is required"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+        std::string slug = extract("slug");
+        if (slug.empty()) {
+            for (char c : title) {
+                if      (std::isalnum(static_cast<unsigned char>(c))) slug += std::tolower(c);
+                else if (!slug.empty() && slug.back() != '-')         slug += '-';
+            }
+            while (!slug.empty() && slug.back() == '-') slug.pop_back();
+            if (slug.empty()) slug = "podcast";
+        }
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            auto q = [&](const std::string& s) {
+                return s.empty() ? std::string("NULL") : ("'" + tdb.escape(s) + "'");
+            };
+            std::ostringstream sql;
+            sql << "INSERT INTO podcast_feeds "
+                << "(user_id, slug, title, description, author, email, cover_image_url, "
+                << " website_url, language, category, explicit_flag, copyright) VALUES ("
+                << rt.user_id << ","
+                << "'" << tdb.escape(slug) << "',"
+                << "'" << tdb.escape(title) << "',"
+                << q(extract("description")) << ","
+                << q(extract("author")) << ","
+                << q(extract("email")) << ","
+                << q(extract("cover_image_url")) << ","
+                << q(extract("website_url")) << ","
+                << "'" << tdb.escape(extract("language").empty() ? "en-us" : extract("language")) << "',"
+                << q(extract("category")) << ","
+                << "0,"
+                << q(extract("copyright"))
+                << ")";
+            try {
+                tdb.exec(sql.str());
+            } catch (const std::exception& e) {
+                if (std::string(e.what()).find("Duplicate") != std::string::npos) {
+                    res.status = 409;
+                    res.set_content(envelope_error("CONFLICT",
+                        "slug '" + slug + "' already exists"),
+                        "application/json; charset=utf-8");
+                    return;
+                }
+                throw;
+            }
+            auto id = tdb.last_insert_id();
+            std::ostringstream d;
+            d << "{\"id\":" << id << ",\"slug\":\"" << json_escape(slug) << "\",\"created\":true}";
+            res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── DELETE /api/v1/me/podcasts/:id ──
+    svr.Delete("/api/v1/me/podcasts/:id", [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        std::string id = req.path_params.at("id");
+        for (char c : id) if (!std::isdigit(static_cast<unsigned char>(c))) {
+            res.status = 400;
+            res.set_content(envelope_error("VALIDATION", "id must be numeric"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            auto n = tdb.exec(
+                "DELETE FROM podcast_feeds WHERE id = " + id +
+                " AND user_id = " + std::to_string(rt.user_id));
+            if (n == 0) {
+                res.status = 404;
+                res.set_content(envelope_error("NOT_FOUND", "no podcast with that id owned by you"),
+                                "application/json; charset=utf-8");
+                return;
+            }
+            std::ostringstream d;
+            d << "{\"id\":" << id << ",\"deleted\":" << n << "}";
+            res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── GET /api/v1/me/podcasts/:id/episodes ──
+    svr.Get("/api/v1/me/podcasts/:id/episodes",
+            [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        std::string fid = req.path_params.at("id");
+        for (char c : fid) if (!std::isdigit(static_cast<unsigned char>(c))) {
+            res.status = 400;
+            res.set_content(envelope_error("VALIDATION", "id must be numeric"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            // Confirm ownership.
+            auto own = tdb.query("SELECT 1 FROM podcast_feeds WHERE id = " + fid
+                                 + " AND user_id = " + std::to_string(rt.user_id) + " LIMIT 1");
+            mcaster1::tagstack::db::Row r0(nullptr, nullptr, 0);
+            if (!own.next(r0)) {
+                res.status = 404;
+                res.set_content(envelope_error("NOT_FOUND", "no podcast with that id owned by you"),
+                                "application/json; charset=utf-8");
+                return;
+            }
+            std::ostringstream sql;
+            sql << "SELECT id, guid, title, COALESCE(description,''), audio_url, audio_mime, "
+                << "       audio_bytes, duration_sec, UNIX_TIMESTAMP(publish_at), "
+                << "       COALESCE(episode_number,0), COALESCE(season_number,0), "
+                << "       explicit_flag, COALESCE(artwork_url,'') "
+                << "FROM podcast_episodes WHERE feed_id = " << fid
+                << " ORDER BY publish_at DESC";
+            auto r = tdb.query(sql.str());
+            std::ostringstream out; out << "[";
+            bool first = true;
+            mcaster1::tagstack::db::Row row(nullptr, nullptr, 0);
+            while (r.next(row)) {
+                if (!first) out << ",";
+                first = false;
+                out << "{\"id\":"             << row.i64(0)
+                    << ",\"guid\":\""        << json_escape(row.str(1)) << "\""
+                    << ",\"title\":\""       << json_escape(row.str(2)) << "\""
+                    << ",\"description\":\""  << json_escape(row.str(3)) << "\""
+                    << ",\"audio_url\":\""   << json_escape(row.str(4)) << "\""
+                    << ",\"audio_mime\":\""  << json_escape(row.str(5)) << "\""
+                    << ",\"audio_bytes\":"   << row.i64(6)
+                    << ",\"duration_sec\":"  << row.i64(7)
+                    << ",\"publish_at\":"    << row.i64(8)
+                    << ",\"episode_number\":"<< row.i64(9)
+                    << ",\"season_number\":" << row.i64(10)
+                    << ",\"explicit_flag\":" << (row.boolean(11) ? "true" : "false")
+                    << ",\"artwork_url\":\"" << json_escape(row.str(12)) << "\""
+                    << "}";
+            }
+            out << "]";
+            res.set_content(envelope(out.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── POST /api/v1/me/podcasts/:id/episodes ──
+    svr.Post("/api/v1/me/podcasts/:id/episodes",
+             [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        std::string fid = req.path_params.at("id");
+        for (char c : fid) if (!std::isdigit(static_cast<unsigned char>(c))) {
+            res.status = 400;
+            res.set_content(envelope_error("VALIDATION", "id must be numeric"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+        auto extract = [&](const std::string& key) -> std::string {
+            const auto& body = req.body;
+            std::string needle = "\"" + key + "\"";
+            auto p = body.find(needle);
+            if (p == std::string::npos) return "";
+            p = body.find(':', p);
+            if (p == std::string::npos) return "";
+            p = body.find('"', p);
+            if (p == std::string::npos) return "";
+            ++p;
+            std::string out;
+            while (p < body.size() && body[p] != '"') {
+                if (body[p] == '\\' && p + 1 < body.size()) { out += body[p+1]; p += 2; }
+                else out += body[p++];
+            }
+            return out;
+        };
+        auto extract_int = [&](const std::string& key) -> int64_t {
+            const auto& body = req.body;
+            std::string needle = "\"" + key + "\"";
+            auto p = body.find(needle);
+            if (p == std::string::npos) return 0;
+            p = body.find(':', p);
+            if (p == std::string::npos) return 0;
+            ++p;
+            while (p < body.size() && (body[p] == ' ' || body[p] == '\t')) ++p;
+            std::string num;
+            while (p < body.size() && (std::isdigit(static_cast<unsigned char>(body[p])) || body[p] == '-')) {
+                num += body[p++];
+            }
+            return num.empty() ? 0 : std::stoll(num);
+        };
+        std::string title     = extract("title");
+        std::string audio_url = extract("audio_url");
+        if (title.empty() || audio_url.empty()) {
+            res.status = 400;
+            res.set_content(envelope_error("VALIDATION", "'title' and 'audio_url' are required"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+        std::string guid = extract("guid");
+        if (guid.empty()) {
+            // Generate a deterministic guid from feed_id + nanoseconds.
+            auto t = std::chrono::system_clock::now().time_since_epoch();
+            auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t).count();
+            guid = "tagstack-ep-" + fid + "-" + std::to_string(ns);
+        }
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            // Ownership check on the parent feed.
+            auto own = tdb.query("SELECT 1 FROM podcast_feeds WHERE id = " + fid
+                                 + " AND user_id = " + std::to_string(rt.user_id) + " LIMIT 1");
+            mcaster1::tagstack::db::Row r0(nullptr, nullptr, 0);
+            if (!own.next(r0)) {
+                res.status = 404;
+                res.set_content(envelope_error("NOT_FOUND", "no podcast with that id owned by you"),
+                                "application/json; charset=utf-8");
+                return;
+            }
+            auto q = [&](const std::string& s) {
+                return s.empty() ? std::string("NULL") : ("'" + tdb.escape(s) + "'");
+            };
+            std::ostringstream sql;
+            sql << "INSERT INTO podcast_episodes "
+                << "(feed_id, guid, title, description, audio_url, audio_mime, "
+                << " audio_bytes, duration_sec, publish_at, episode_number, "
+                << " season_number, explicit_flag, artwork_url) VALUES ("
+                << fid << ","
+                << "'" << tdb.escape(guid) << "',"
+                << "'" << tdb.escape(title) << "',"
+                << q(extract("description")) << ","
+                << "'" << tdb.escape(audio_url) << "',"
+                << "'" << tdb.escape(extract("audio_mime").empty()
+                                     ? "audio/mpeg" : extract("audio_mime")) << "',"
+                << extract_int("audio_bytes") << ","
+                << extract_int("duration_sec") << ","
+                << "NOW(),"
+                << extract_int("episode_number") << ","
+                << extract_int("season_number") << ","
+                << extract_int("explicit_flag") << ","
+                << q(extract("artwork_url"))
+                << ")";
+            tdb.exec(sql.str());
+            auto id = tdb.last_insert_id();
+            std::ostringstream d;
+            d << "{\"id\":" << id << ",\"guid\":\"" << json_escape(guid) << "\",\"created\":true}";
+            res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── DELETE /api/v1/me/podcasts/:fid/episodes/:eid ──
+    svr.Delete("/api/v1/me/podcasts/:fid/episodes/:eid",
+               [&cfg, &require_auth](const httplib::Request& req, httplib::Response& res) {
+        auto rt = require_auth(req, res);
+        if (rt.user_id == 0) return;
+        std::string fid = req.path_params.at("fid");
+        std::string eid = req.path_params.at("eid");
+        for (char c : fid) if (!std::isdigit(static_cast<unsigned char>(c))) {
+            res.status = 400;
+            res.set_content(envelope_error("VALIDATION", "fid must be numeric"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+        for (char c : eid) if (!std::isdigit(static_cast<unsigned char>(c))) {
+            res.status = 400;
+            res.set_content(envelope_error("VALIDATION", "eid must be numeric"),
+                            "application/json; charset=utf-8");
+            return;
+        }
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            // Single statement: only delete if the join also owns the feed.
+            auto n = tdb.exec(
+                "DELETE e FROM podcast_episodes e "
+                "JOIN podcast_feeds f ON f.id = e.feed_id "
+                "WHERE e.id = " + eid + " AND f.id = " + fid
+                + " AND f.user_id = " + std::to_string(rt.user_id));
+            if (n == 0) {
+                res.status = 404;
+                res.set_content(envelope_error("NOT_FOUND", "episode not found / not yours"),
+                                "application/json; charset=utf-8");
+                return;
+            }
+            std::ostringstream d;
+            d << "{\"id\":" << eid << ",\"deleted\":" << n << "}";
+            res.set_content(envelope(d.str()), "application/json; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content(envelope_error("DB_UNAVAILABLE", e.what()),
+                            "application/json; charset=utf-8");
+        }
+    });
+
+    // ── GET /podcasts/:slug/rss  (PUBLIC — no auth) ──
+    // Renders an RSS 2.0 + iTunes-namespace feed for the matching slug.
+    // Lookup is by slug across all users; slug uniqueness is per-user, so a
+    // ?user= query param is honored when there's ambiguity. Keep this PUBLIC
+    // so podcast clients can subscribe without bearer tokens.
+    auto rss_handler = [&cfg](const httplib::Request& req, httplib::Response& res) {
+        try {
+            mcaster1::tagstack::db::Connection tdb;
+            tdb.connect(cfg.db);
+            std::string slug = req.path_params.at("slug");
+            auto eslug = tdb.escape(slug);
+            std::ostringstream q;
+            q << "SELECT id, user_id, title, COALESCE(description,''), COALESCE(author,''), "
+              << "       COALESCE(email,''), COALESCE(cover_image_url,''), "
+              << "       COALESCE(website_url,''), language, COALESCE(category,''), "
+              << "       explicit_flag, COALESCE(copyright,'') "
+              << "FROM podcast_feeds WHERE slug = '" << eslug << "' LIMIT 1";
+            auto fr = tdb.query(q.str());
+            mcaster1::tagstack::db::Row row(nullptr, nullptr, 0);
+            if (!fr.next(row)) {
+                res.status = 404;
+                res.set_content("podcast not found", "text/plain");
+                return;
+            }
+            int64_t fid       = row.i64(0);
+            std::string title = row.str(2);
+            std::string desc  = row.str(3);
+            std::string auth  = row.str(4);
+            std::string email = row.str(5);
+            std::string cover = row.str(6);
+            std::string web   = row.str(7);
+            std::string lang  = row.str(8);
+            std::string cat   = row.str(9);
+            bool        expl  = row.boolean(10);
+            std::string copy_ = row.str(11);
+            auto xml = [](const std::string& s) {
+                std::string out;
+                out.reserve(s.size());
+                for (char c : s) {
+                    switch (c) {
+                        case '&':  out += "&amp;"; break;
+                        case '<':  out += "&lt;"; break;
+                        case '>':  out += "&gt;"; break;
+                        case '"':  out += "&quot;"; break;
+                        case '\'': out += "&apos;"; break;
+                        default:   out += c;
+                    }
+                }
+                return out;
+            };
+            std::ostringstream o;
+            o << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+              << "<rss version=\"2.0\" xmlns:itunes=\"http://www.itunes.com/dtds/podcast-1.0.dtd\""
+              << " xmlns:content=\"http://purl.org/rss/1.0/modules/content/\">\n"
+              << "  <channel>\n"
+              << "    <title>" << xml(title) << "</title>\n"
+              << "    <link>" << xml(web.empty() ? ("https://tagstack.mcaster1.com/p/" + slug) : web) << "</link>\n"
+              << "    <description>" << xml(desc) << "</description>\n"
+              << "    <language>" << xml(lang) << "</language>\n"
+              << "    <itunes:author>" << xml(auth) << "</itunes:author>\n"
+              << "    <itunes:summary>" << xml(desc) << "</itunes:summary>\n"
+              << "    <itunes:explicit>" << (expl ? "yes" : "no") << "</itunes:explicit>\n"
+              << "    <itunes:owner><itunes:name>" << xml(auth) << "</itunes:name>"
+              << "      <itunes:email>" << xml(email) << "</itunes:email></itunes:owner>\n";
+            if (!cat.empty())   o << "    <itunes:category text=\"" << xml(cat) << "\"/>\n";
+            if (!cover.empty()) o << "    <itunes:image href=\"" << xml(cover) << "\"/>\n";
+            if (!copy_.empty()) o << "    <copyright>" << xml(copy_) << "</copyright>\n";
+
+            auto er = tdb.query(
+                "SELECT guid, title, COALESCE(description,''), audio_url, audio_mime, "
+                "       audio_bytes, duration_sec, UNIX_TIMESTAMP(publish_at), "
+                "       COALESCE(episode_number,0), COALESCE(season_number,0), "
+                "       explicit_flag, COALESCE(artwork_url,'') "
+                "FROM podcast_episodes WHERE feed_id = " + std::to_string(fid)
+                + " ORDER BY publish_at DESC LIMIT 500");
+            mcaster1::tagstack::db::Row erow(nullptr, nullptr, 0);
+            while (er.next(erow)) {
+                auto ts = erow.i64(7);
+                std::time_t t = static_cast<std::time_t>(ts);
+                std::tm tm{};
+                gmtime_r(&t, &tm);
+                char buf[64];
+                std::strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", &tm);
+                o << "    <item>\n"
+                  << "      <guid isPermaLink=\"false\">" << xml(erow.str(0)) << "</guid>\n"
+                  << "      <title>" << xml(erow.str(1)) << "</title>\n"
+                  << "      <description>" << xml(erow.str(2)) << "</description>\n"
+                  << "      <pubDate>" << buf << "</pubDate>\n"
+                  << "      <enclosure url=\"" << xml(erow.str(3))
+                  << "\" length=\"" << erow.i64(5) << "\" type=\"" << xml(erow.str(4)) << "\"/>\n"
+                  << "      <itunes:duration>" << erow.i64(6) << "</itunes:duration>\n";
+                if (erow.i64(8) > 0) o << "      <itunes:episode>" << erow.i64(8) << "</itunes:episode>\n";
+                if (erow.i64(9) > 0) o << "      <itunes:season>"  << erow.i64(9) << "</itunes:season>\n";
+                o << "      <itunes:explicit>" << (erow.boolean(10) ? "yes" : "no")
+                  << "</itunes:explicit>\n"
+                  << "    </item>\n";
+            }
+            o << "  </channel>\n</rss>\n";
+            res.set_content(o.str(), "application/rss+xml; charset=utf-8");
+        } catch (const std::exception& e) {
+            res.status = 503;
+            res.set_content("error: " + std::string(e.what()), "text/plain");
+        }
+    };
+    svr.Get("/podcasts/:slug/rss", rss_handler);
+
     // ── POST /api/v1/admin/yp/refresh ──
     // Admin-only: kicks an immediate YP ingest. Admin = cc_user_link.account_type='admin'
     // OR cc_usergroupid IN (6=Administrators, 5=Super Moderators).
@@ -2225,6 +2710,13 @@ int main(int argc, char** argv) {
           << "\"PUT /api/v1/me/events/{id}\","
           << "\"DELETE /api/v1/me/events/{id}\","
           << "\"GET /api/v1/me/events/{id}/runs\","
+          << "\"GET /api/v1/me/podcasts\","
+          << "\"POST /api/v1/me/podcasts\","
+          << "\"DELETE /api/v1/me/podcasts/{id}\","
+          << "\"GET /api/v1/me/podcasts/{id}/episodes\","
+          << "\"POST /api/v1/me/podcasts/{id}/episodes\","
+          << "\"DELETE /api/v1/me/podcasts/{fid}/episodes/{eid}\","
+          << "\"GET /podcasts/{slug}/rss\","
           << "\"POST /api/v1/admin/yp/refresh\","
           << "\"GET /api/v1/now-playing/{station}\","
           << "\"PUT /api/v1/now-playing/{station}\","
